@@ -1,0 +1,415 @@
+use std::path::PathBuf;
+use std::sync::atomic::Ordering;
+use std::time::Instant;
+
+use crate::build::{BuildHistory, BuildJob, BuildJobStatus, BuildMsg, BuildQueue};
+use crate::dep_graph::DepGraph;
+use crate::package::{PackageState, Status};
+use crate::repo;
+use crate::template;
+use crate::version_check;
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum View {
+    List,
+    Tree,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum PanelMode {
+    None,
+    Detail,
+    BuildLog,
+}
+
+pub struct App {
+    pub packages: Vec<PackageState>,
+    pub selected: usize,
+    pub view: View,
+    pub dep_graph: DepGraph,
+    pub void_pkgs: PathBuf,
+    pub panel: PanelMode,
+    pub checking_versions: bool,
+    pub status_msg: Option<String>,
+    pub should_quit: bool,
+    pub build_queue: BuildQueue,
+    pub build_history: BuildHistory,
+    pub cancel_pending: Option<Instant>,
+}
+
+impl App {
+    pub fn new(void_pkgs: PathBuf) -> anyhow::Result<Self> {
+        let names = repo::discover_custom_packages(&void_pkgs)?;
+        let packages = repo::load_packages(&void_pkgs, &names);
+        let dep_graph = DepGraph::build(&packages);
+        let states = repo::build_package_states(&void_pkgs, packages);
+
+        Ok(App {
+            packages: states,
+            selected: 0,
+            view: View::List,
+            dep_graph,
+            void_pkgs,
+            panel: PanelMode::None,
+            checking_versions: false,
+            status_msg: Some("Press 'u' to check upstream versions".to_string()),
+            should_quit: false,
+            build_queue: BuildQueue::new(),
+            build_history: BuildHistory::load(),
+            cancel_pending: None,
+        })
+    }
+
+    pub fn selected_package(&self) -> Option<&PackageState> {
+        self.packages.get(self.selected)
+    }
+
+    pub fn move_up(&mut self) {
+        if self.selected > 0 {
+            self.selected -= 1;
+        }
+    }
+
+    pub fn move_down(&mut self) {
+        if self.selected + 1 < self.packages.len() {
+            self.selected += 1;
+        }
+    }
+
+    pub fn toggle_detail(&mut self) {
+        self.panel = match self.panel {
+            PanelMode::Detail => PanelMode::None,
+            _ => PanelMode::Detail,
+        };
+    }
+
+    pub fn toggle_tree(&mut self) {
+        self.view = match self.view {
+            View::List => View::Tree,
+            View::Tree => View::List,
+        };
+    }
+
+    pub fn refresh(&mut self) {
+        if let Ok(names) = repo::discover_custom_packages(&self.void_pkgs) {
+            let packages = repo::load_packages(&self.void_pkgs, &names);
+            self.dep_graph = DepGraph::build(&packages);
+            let mut states = repo::build_package_states(&self.void_pkgs, packages);
+
+            // Preserve latest versions and build-failed overrides from previous state
+            let old_latest: std::collections::HashMap<String, String> = self
+                .packages
+                .iter()
+                .filter_map(|p| {
+                    p.latest
+                        .as_ref()
+                        .map(|v| (p.package.name.clone(), v.clone()))
+                })
+                .collect();
+
+            let failed: std::collections::HashSet<String> = self
+                .packages
+                .iter()
+                .filter(|p| p.status == Status::BuildFailed)
+                .map(|p| p.package.name.clone())
+                .collect();
+
+            for state in &mut states {
+                if let Some(latest) = old_latest.get(&state.package.name) {
+                    state.latest = Some(latest.clone());
+                    state.status = PackageState::compute_status(
+                        &state.package,
+                        &state.installed,
+                        &state.built,
+                        &state.latest,
+                    );
+                }
+                if failed.contains(&state.package.name) {
+                    state.status = Status::BuildFailed;
+                }
+            }
+
+            self.packages = states;
+            if self.selected >= self.packages.len() {
+                self.selected = self.packages.len().saturating_sub(1);
+            }
+            self.status_msg = Some("Refreshed".to_string());
+        }
+    }
+
+    pub fn check_versions(&mut self) {
+        self.status_msg = Some("Checking upstream versions...".to_string());
+        self.checking_versions = true;
+
+        let pkgs: Vec<_> = self.packages.iter().map(|s| s.package.clone()).collect();
+        let versions = version_check::check_all_versions(&self.void_pkgs, &pkgs, false);
+
+        for state in &mut self.packages {
+            if let Some(ver) = versions.get(&state.package.name) {
+                state.latest = Some(ver.clone());
+                state.status = PackageState::compute_status(
+                    &state.package,
+                    &state.installed,
+                    &state.built,
+                    &state.latest,
+                );
+            }
+        }
+
+        let count = versions.len();
+        self.checking_versions = false;
+        self.status_msg = Some(format!("Checked {} packages", count));
+    }
+
+    pub fn force_check_versions(&mut self) {
+        self.status_msg = Some("Force-checking upstream versions...".to_string());
+        self.checking_versions = true;
+
+        let pkgs: Vec<_> = self.packages.iter().map(|s| s.package.clone()).collect();
+        let versions = version_check::check_all_versions(&self.void_pkgs, &pkgs, true);
+
+        for state in &mut self.packages {
+            if let Some(ver) = versions.get(&state.package.name) {
+                state.latest = Some(ver.clone());
+                state.status = PackageState::compute_status(
+                    &state.package,
+                    &state.installed,
+                    &state.built,
+                    &state.latest,
+                );
+            }
+        }
+
+        let count = versions.len();
+        self.checking_versions = false;
+        self.status_msg = Some(format!("Force-checked {} packages", count));
+    }
+
+    /// Poll the build queue for messages from the background thread.
+    pub fn poll_build(&mut self) {
+        if !self.build_queue.active {
+            return;
+        }
+
+        let msgs: Vec<BuildMsg> = if let Some(ref rx) = self.build_queue.receiver {
+            rx.try_iter().collect()
+        } else {
+            return;
+        };
+
+        for msg in msgs {
+            match msg {
+                BuildMsg::Started(name) => {
+                    for job in &mut self.build_queue.jobs {
+                        if job.name == name {
+                            job.status = BuildJobStatus::Building;
+                        }
+                    }
+                    self.build_queue.current_output.clear();
+                    self.status_msg = Some(format!("Building {}...", name));
+                }
+                BuildMsg::Output(_name, line) => {
+                    self.build_queue.current_output.push(line);
+                    // Keep only last 200 lines in memory
+                    if self.build_queue.current_output.len() > 200 {
+                        let drain = self.build_queue.current_output.len() - 200;
+                        self.build_queue.current_output.drain(..drain);
+                    }
+                }
+                BuildMsg::Finished(name) => {
+                    for job in &mut self.build_queue.jobs {
+                        if job.name == name {
+                            job.status = BuildJobStatus::Success;
+                        }
+                    }
+                    self.build_history.record(&name, true);
+                }
+                BuildMsg::Failed(name, error_lines) => {
+                    for job in &mut self.build_queue.jobs {
+                        if job.name == name {
+                            job.status = BuildJobStatus::Failed;
+                        }
+                    }
+                    // Set BuildFailed status on the package
+                    for state in &mut self.packages {
+                        if state.package.name == name {
+                            state.status = Status::BuildFailed;
+                        }
+                    }
+                    // Append error lines to output
+                    for line in &error_lines {
+                        self.build_queue.current_output.push(format!("ERR: {}", line));
+                    }
+                    self.build_history.record(&name, false);
+                }
+                BuildMsg::QueueComplete => {
+                    self.build_queue.active = false;
+                    self.build_queue.receiver = None;
+
+                    // Refresh to pick up new .xbps files
+                    self.refresh();
+
+                    // Build the xi command for successful packages
+                    let succeeded: Vec<String> = self
+                        .build_queue
+                        .jobs
+                        .iter()
+                        .filter(|j| j.status == BuildJobStatus::Success)
+                        .map(|j| j.name.clone())
+                        .collect();
+
+                    if !succeeded.is_empty() {
+                        self.status_msg =
+                            Some(format!("Run: xi {}", succeeded.join(" ")));
+                    } else {
+                        self.status_msg = Some("Build queue finished (no successful builds)".to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    /// Build the currently selected package.
+    pub fn build_selected(&mut self) {
+        if self.build_queue.active {
+            self.status_msg = Some("Build already in progress".to_string());
+            return;
+        }
+
+        let name = match self.selected_package() {
+            Some(p) => p.package.name.clone(),
+            None => return,
+        };
+
+        self.build_queue.jobs = vec![BuildJob {
+            name,
+            status: BuildJobStatus::Pending,
+        }];
+        self.build_queue.start(self.void_pkgs.clone());
+        self.panel = PanelMode::BuildLog;
+    }
+
+    /// Build the selected package plus all reverse dependents in topological order.
+    pub fn build_with_dependents(&mut self) {
+        if self.build_queue.active {
+            self.status_msg = Some("Build already in progress".to_string());
+            return;
+        }
+
+        let name = match self.selected_package() {
+            Some(p) => p.package.name.clone(),
+            None => return,
+        };
+
+        let dependents = self.dep_graph.rebuild_set(&[name.clone()]);
+        let mut all = vec![name];
+        all.extend(dependents);
+
+        self.build_queue.jobs = all
+            .into_iter()
+            .map(|n| BuildJob {
+                name: n,
+                status: BuildJobStatus::Pending,
+            })
+            .collect();
+        self.build_queue.start(self.void_pkgs.clone());
+        self.panel = PanelMode::BuildLog;
+    }
+
+    /// Bump template version and queue a build (for UPDATE AVAIL packages).
+    pub fn bump_and_build(&mut self) {
+        if self.build_queue.active {
+            self.status_msg = Some("Build already in progress".to_string());
+            return;
+        }
+
+        let (name, latest) = match self.selected_package() {
+            Some(p) if p.status == Status::UpdateAvailable => {
+                let latest = p.latest.clone().unwrap_or_default();
+                (p.package.name.clone(), latest)
+            }
+            _ => {
+                // Not UPDATE AVAIL — fall through to force_check_versions
+                self.force_check_versions();
+                return;
+            }
+        };
+
+        self.status_msg = Some(format!("Bumping {} to v{}...", name, latest));
+
+        match template::bump_template(&self.void_pkgs, &name, &latest) {
+            Ok(result) => {
+                self.status_msg = Some(format!(
+                    "Bumped {} {} -> {} (checksum: {}...)",
+                    name,
+                    result.old_version,
+                    result.new_version,
+                    &result.new_checksum[..12]
+                ));
+
+                // Refresh to pick up the new template version
+                self.refresh();
+
+                // Now queue the build
+                self.build_queue.jobs = vec![BuildJob {
+                    name,
+                    status: BuildJobStatus::Pending,
+                }];
+                self.build_queue.start(self.void_pkgs.clone());
+                self.panel = PanelMode::BuildLog;
+            }
+            Err(e) => {
+                self.status_msg = Some(format!("Bump failed: {}", e));
+            }
+        }
+    }
+
+    /// Handle cancel build: double-Esc within 2 seconds.
+    pub fn cancel_build(&mut self) {
+        if !self.build_queue.active {
+            return;
+        }
+
+        if let Some(first_press) = self.cancel_pending {
+            if first_press.elapsed().as_secs() < 2 {
+                // Second press within 2s — cancel
+                self.build_queue.cancel_flag.store(true, Ordering::SeqCst);
+                self.cancel_pending = None;
+                self.status_msg = Some("Cancelling build...".to_string());
+            } else {
+                // Expired — treat as first press again
+                self.cancel_pending = Some(Instant::now());
+                self.status_msg = Some("Press Esc again to cancel build".to_string());
+            }
+        } else {
+            self.cancel_pending = Some(Instant::now());
+            self.status_msg = Some("Press Esc again to cancel build".to_string());
+        }
+    }
+
+    /// Get summary counts for status bar.
+    pub fn status_counts(&self) -> StatusCounts {
+        let mut counts = StatusCounts::default();
+        for p in &self.packages {
+            match p.status {
+                Status::Ok => counts.ok += 1,
+                Status::NotInstalled => counts.not_installed += 1,
+                Status::BuildReady => counts.build_ready += 1,
+                Status::NeedsBuild => counts.needs_build += 1,
+                Status::UpdateAvailable => counts.update_avail += 1,
+                Status::BuildFailed => counts.build_failed += 1,
+            }
+        }
+        counts
+    }
+}
+
+#[derive(Default)]
+pub struct StatusCounts {
+    pub ok: usize,
+    pub not_installed: usize,
+    pub build_ready: usize,
+    pub needs_build: usize,
+    pub update_avail: usize,
+    pub build_failed: usize,
+}
