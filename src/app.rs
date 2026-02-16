@@ -7,9 +7,11 @@ use ratatui::widgets::TableState;
 
 use crate::build::{BuildHistory, BuildJob, BuildJobStatus, BuildMsg, BuildQueue};
 use crate::dep_graph::DepGraph;
+use crate::gcc::GccInfo;
 use crate::git::{self, GitMsg, GitStatus};
 use crate::package::{Package, PackageState, Status};
 use crate::repo;
+use crate::shlibs::{self, ShlibMap};
 use crate::template;
 use crate::version_check;
 
@@ -48,6 +50,8 @@ pub struct App {
     pub table_state: TableState,
     pub filter: String,
     pub filter_active: bool,
+    pub shlib_map: ShlibMap,
+    pub gcc_info: GccInfo,
 }
 
 impl App {
@@ -55,9 +59,20 @@ impl App {
         let names = repo::discover_custom_packages(&void_pkgs)?;
         let packages = repo::load_packages(&void_pkgs, &names);
         let dep_graph = DepGraph::build(&packages);
-        let states = repo::build_package_states(&void_pkgs, packages);
+        let mut states = repo::build_package_states(&void_pkgs, packages);
 
         let git_status = git::get_git_status(&void_pkgs);
+        let shlib_map = shlibs::parse_shlibs(&void_pkgs);
+        let gcc_info = GccInfo::detect();
+
+        // Populate shlibs and check mismatches
+        for state in &mut states {
+            if let Some(entries) = shlib_map.get(&state.package.name) {
+                state.shlibs = entries.clone();
+                state.soname_mismatches =
+                    shlibs::check_soname_mismatches(entries, &state.package.name);
+            }
+        }
 
         Ok(App {
             packages: states,
@@ -80,6 +95,8 @@ impl App {
             table_state: TableState::default(),
             filter: String::new(),
             filter_active: false,
+            shlib_map,
+            gcc_info,
         })
     }
 
@@ -189,6 +206,16 @@ impl App {
                 }
                 if failed.contains(&state.package.name) {
                     state.status = Status::BuildFailed;
+                }
+            }
+
+            // Re-parse shlibs and check mismatches
+            self.shlib_map = shlibs::parse_shlibs(&self.void_pkgs);
+            for state in &mut states {
+                if let Some(entries) = self.shlib_map.get(&state.package.name) {
+                    state.shlibs = entries.clone();
+                    state.soname_mismatches =
+                        shlibs::check_soname_mismatches(entries, &state.package.name);
                 }
             }
 
@@ -357,6 +384,15 @@ impl App {
             None => return,
         };
 
+        if self.gcc_info.is_blocked(&name) {
+            let req = self.gcc_info.required_version(&name).unwrap_or_default();
+            self.status_msg = Some(format!(
+                "Cannot build {}: requires GCC {}+, system has {}",
+                name, req, self.gcc_info.version_string()
+            ));
+            return;
+        }
+
         self.build_queue.jobs = vec![BuildJob {
             name,
             status: BuildJobStatus::Pending,
@@ -380,6 +416,21 @@ impl App {
         let dependents = self.dep_graph.rebuild_set(&[name.clone()]);
         let mut all = vec![name];
         all.extend(dependents);
+
+        // Check GCC requirements for all packages in queue
+        let blocked: Vec<String> = all
+            .iter()
+            .filter(|n| self.gcc_info.is_blocked(n))
+            .cloned()
+            .collect();
+        if !blocked.is_empty() {
+            self.status_msg = Some(format!(
+                "Cannot build: {} require newer GCC (system has {})",
+                blocked.join(", "),
+                self.gcc_info.version_string()
+            ));
+            return;
+        }
 
         self.build_queue.jobs = all
             .into_iter()
@@ -410,6 +461,15 @@ impl App {
                 return;
             }
         };
+
+        if self.gcc_info.is_blocked(&name) {
+            let req = self.gcc_info.required_version(&name).unwrap_or_default();
+            self.status_msg = Some(format!(
+                "Cannot build {}: requires GCC {}+, system has {}",
+                name, req, self.gcc_info.version_string()
+            ));
+            return;
+        }
 
         self.status_msg = Some(format!("Bumping {} to v{}...", name, latest));
 

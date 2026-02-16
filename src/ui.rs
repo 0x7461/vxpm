@@ -36,7 +36,7 @@ fn status_color(status: &Status) -> Color {
 pub fn draw(f: &mut Frame, app: &mut App) {
     let panel_height = match app.panel {
         PanelMode::None => 0,
-        PanelMode::Detail => 8,
+        PanelMode::Detail => 10,
         PanelMode::BuildLog => 12,
         PanelMode::GitMenu => 10,
     };
@@ -66,7 +66,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 
     let visible_indices: Vec<usize> = app.visible_packages().iter().map(|(i, _)| *i).collect();
     match app.view {
-        View::List => draw_package_list(f, &mut app.table_state, app.selected, &app.packages, &visible_indices, chunks[1]),
+        View::List => draw_package_list(f, &mut app.table_state, app.selected, &app.packages, &visible_indices, &app.gcc_info, chunks[1]),
         View::Tree => draw_tree_view(f, app, chunks[1]),
     }
 
@@ -126,6 +126,13 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
         }
     }
 
+    // GCC version
+    spans.push(Span::styled("  ", Style::default()));
+    spans.push(Span::styled(
+        format!("GCC {}", app.gcc_info.version_string()),
+        Style::default().fg(OVERLAY0),
+    ));
+
     // Filter indicator
     if app.filter_active {
         spans.push(Span::styled("  / ", Style::default().fg(TEAL).add_modifier(Modifier::BOLD)));
@@ -156,6 +163,7 @@ fn draw_package_list(
     selected: usize,
     packages: &[crate::package::PackageState],
     visible_indices: &[usize],
+    gcc_info: &crate::gcc::GccInfo,
     area: Rect,
 ) {
     let header_cells = ["Package", "Template", "Installed", "Latest", "Status"]
@@ -186,14 +194,30 @@ fn draw_package_list(
                 Style::default().fg(TEXT)
             };
 
-            let status_style = if i == selected {
+            // Build status label with optional badges
+            let mut status_label = ps.status.label().to_string();
+            if !ps.soname_mismatches.is_empty() {
+                status_label.push_str(" !so");
+            }
+            if gcc_info.is_blocked(&ps.package.name) {
+                let req = gcc_info.required_version(&ps.package.name).unwrap_or_default();
+                status_label.push_str(&format!(" GCC {}+", req));
+            }
+
+            let status_fg = if !ps.soname_mismatches.is_empty() || gcc_info.is_blocked(&ps.package.name) {
+                if ps.status == Status::Ok { PEACH } else { status_color(&ps.status) }
+            } else {
+                status_color(&ps.status)
+            };
+
+            let final_status_style = if i == selected {
                 Style::default()
                     .bg(SURFACE0)
-                    .fg(status_color(&ps.status))
+                    .fg(status_fg)
                     .add_modifier(Modifier::BOLD)
             } else {
                 Style::default()
-                    .fg(status_color(&ps.status))
+                    .fg(status_fg)
                     .add_modifier(Modifier::BOLD)
             };
 
@@ -202,7 +226,7 @@ fn draw_package_list(
                 Cell::from(ps.package.version.clone()).style(style),
                 Cell::from(installed_display).style(style),
                 Cell::from(latest_display).style(style),
-                Cell::from(ps.status.label()).style(status_style),
+                Cell::from(status_label).style(final_status_style),
             ])
         })
         .collect();
@@ -335,7 +359,7 @@ fn draw_detail(f: &mut Frame, app: &App, area: Rect) {
         })
         .unwrap_or_default();
 
-    let lines = vec![
+    let mut lines = vec![
         Line::from(vec![
             Span::styled("  ", Style::default()),
             Span::styled(&pkg.short_desc, Style::default().fg(TEXT)),
@@ -363,6 +387,47 @@ fn draw_detail(f: &mut Frame, app: &App, area: Rect) {
             ),
         ]),
     ];
+
+    // Shared libs line
+    if !selected.shlibs.is_empty() {
+        let mut shlib_spans = vec![
+            Span::styled("  Shared libs: ", Style::default().fg(OVERLAY0)),
+        ];
+        for entry in &selected.shlibs {
+            let mismatch = selected
+                .soname_mismatches
+                .iter()
+                .find(|m| m.registered == entry.soname);
+            if let Some(m) = mismatch {
+                shlib_spans.push(Span::styled(
+                    format!("{} (installed: {} — MISMATCH) ", entry.soname, m.installed),
+                    Style::default().fg(PEACH),
+                ));
+            } else {
+                shlib_spans.push(Span::styled(
+                    format!("{} (OK) ", entry.soname),
+                    Style::default().fg(GREEN),
+                ));
+            }
+        }
+        lines.push(Line::from(shlib_spans));
+    }
+
+    // GCC requirement line
+    if app.gcc_info.is_blocked(&pkg.name) {
+        let req = app.gcc_info.required_version(&pkg.name).unwrap_or_default();
+        lines.push(Line::from(vec![
+            Span::styled("  GCC: ", Style::default().fg(OVERLAY0)),
+            Span::styled(
+                format!(
+                    "Requires {}+, system has {}",
+                    req,
+                    app.gcc_info.version_string()
+                ),
+                Style::default().fg(RED),
+            ),
+        ]));
+    }
 
     let para = Paragraph::new(lines)
         .block(

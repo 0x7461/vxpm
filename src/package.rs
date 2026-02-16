@@ -4,6 +4,8 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
+use crate::shlibs::{ShlibEntry, SonameMismatch};
+
 #[derive(Debug, Clone, Serialize)]
 pub struct Package {
     pub name: String,
@@ -26,6 +28,10 @@ pub struct PackageState {
     pub built: Option<String>,
     pub latest: Option<String>,
     pub status: Status,
+    #[serde(skip)]
+    pub shlibs: Vec<ShlibEntry>,
+    #[serde(skip)]
+    pub soname_mismatches: Vec<SonameMismatch>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]

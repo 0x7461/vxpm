@@ -1,9 +1,11 @@
 mod app;
 mod build;
 mod dep_graph;
+mod gcc;
 mod git;
 mod package;
 mod repo;
+mod shlibs;
 mod template;
 mod ui;
 mod version_check;
