@@ -167,23 +167,29 @@ fn check_xbps_src(void_pkgs: &Path, name: &str) -> Result<Option<String>> {
     Ok(None)
 }
 
-/// Check all packages for upstream versions. Uses cache, respects TTL.
-/// If `force` is true, ignores cache TTL.
-pub fn check_all_versions(
+pub enum VersionMsg {
+    Found(String, String), // (name, version)
+    Done(usize),           // total count checked
+}
+
+/// Check all packages for upstream versions, sending results incrementally.
+pub fn check_all_versions_streaming(
     void_pkgs: &Path,
     packages: &[Package],
     force: bool,
-) -> HashMap<String, String> {
+    tx: std::sync::mpsc::Sender<VersionMsg>,
+) {
     let mut cache = load_cache();
     let now = now_secs();
-    let mut results = HashMap::new();
+    let mut count = 0;
 
     for pkg in packages {
         // Check cache first
         if !force {
             if let Some(entry) = cache.entries.get(&pkg.name) {
                 if now - entry.timestamp < CACHE_TTL_SECS {
-                    results.insert(pkg.name.clone(), entry.version.clone());
+                    let _ = tx.send(VersionMsg::Found(pkg.name.clone(), entry.version.clone()));
+                    count += 1;
                     continue;
                 }
             }
@@ -193,13 +199,9 @@ pub fn check_all_versions(
         let version = if let Some((owner, repo)) = extract_github_repo(pkg) {
             match check_github(&owner, &repo) {
                 Ok(Some(v)) => Some(v),
-                _ => {
-                    // GitHub failed, try xbps-src
-                    check_xbps_src(void_pkgs, &pkg.name).ok().flatten()
-                }
+                _ => check_xbps_src(void_pkgs, &pkg.name).ok().flatten(),
             }
         } else {
-            // No GitHub URL, try xbps-src
             check_xbps_src(void_pkgs, &pkg.name).ok().flatten()
         };
 
@@ -211,10 +213,12 @@ pub fn check_all_versions(
                     timestamp: now,
                 },
             );
-            results.insert(pkg.name.clone(), ver);
+            let _ = tx.send(VersionMsg::Found(pkg.name.clone(), ver));
+            count += 1;
         }
     }
 
     save_cache(&cache);
-    results
+    let _ = tx.send(VersionMsg::Done(count));
 }
+

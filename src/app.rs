@@ -1,10 +1,11 @@
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
+use std::sync::mpsc::Receiver;
 use std::time::Instant;
 
 use crate::build::{BuildHistory, BuildJob, BuildJobStatus, BuildMsg, BuildQueue};
 use crate::dep_graph::DepGraph;
-use crate::package::{PackageState, Status};
+use crate::package::{Package, PackageState, Status};
 use crate::repo;
 use crate::template;
 use crate::version_check;
@@ -35,6 +36,7 @@ pub struct App {
     pub build_queue: BuildQueue,
     pub build_history: BuildHistory,
     pub cancel_pending: Option<Instant>,
+    pub version_check_rx: Option<Receiver<version_check::VersionMsg>>,
 }
 
 impl App {
@@ -57,6 +59,7 @@ impl App {
             build_queue: BuildQueue::new(),
             build_history: BuildHistory::load(),
             cancel_pending: None,
+            version_check_rx: None,
         })
     }
 
@@ -138,51 +141,63 @@ impl App {
     }
 
     pub fn check_versions(&mut self) {
-        self.status_msg = Some("Checking upstream versions...".to_string());
-        self.checking_versions = true;
-
-        let pkgs: Vec<_> = self.packages.iter().map(|s| s.package.clone()).collect();
-        let versions = version_check::check_all_versions(&self.void_pkgs, &pkgs, false);
-
-        for state in &mut self.packages {
-            if let Some(ver) = versions.get(&state.package.name) {
-                state.latest = Some(ver.clone());
-                state.status = PackageState::compute_status(
-                    &state.package,
-                    &state.installed,
-                    &state.built,
-                    &state.latest,
-                );
-            }
-        }
-
-        let count = versions.len();
-        self.checking_versions = false;
-        self.status_msg = Some(format!("Checked {} packages", count));
+        self.start_version_check(false);
     }
 
     pub fn force_check_versions(&mut self) {
-        self.status_msg = Some("Force-checking upstream versions...".to_string());
+        self.start_version_check(true);
+    }
+
+    fn start_version_check(&mut self, force: bool) {
+        if self.checking_versions {
+            return;
+        }
         self.checking_versions = true;
+        let label = if force { "Force-checking" } else { "Checking" };
+        self.status_msg = Some(format!("{} upstream versions...", label));
 
-        let pkgs: Vec<_> = self.packages.iter().map(|s| s.package.clone()).collect();
-        let versions = version_check::check_all_versions(&self.void_pkgs, &pkgs, true);
+        let pkgs: Vec<Package> = self.packages.iter().map(|s| s.package.clone()).collect();
+        let void_pkgs = self.void_pkgs.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.version_check_rx = Some(rx);
 
-        for state in &mut self.packages {
-            if let Some(ver) = versions.get(&state.package.name) {
-                state.latest = Some(ver.clone());
-                state.status = PackageState::compute_status(
-                    &state.package,
-                    &state.installed,
-                    &state.built,
-                    &state.latest,
-                );
+        std::thread::spawn(move || {
+            version_check::check_all_versions_streaming(&void_pkgs, &pkgs, force, tx);
+        });
+    }
+
+    /// Poll for version check results. Call each tick.
+    pub fn poll_version_check(&mut self) {
+        let msgs: Vec<version_check::VersionMsg> = if let Some(ref rx) = self.version_check_rx {
+            rx.try_iter().collect()
+        } else {
+            return;
+        };
+
+        for msg in msgs {
+            match msg {
+                version_check::VersionMsg::Found(name, ver) => {
+                    for state in &mut self.packages {
+                        if state.package.name == name {
+                            state.latest = Some(ver.clone());
+                            state.status = PackageState::compute_status(
+                                &state.package,
+                                &state.installed,
+                                &state.built,
+                                &state.latest,
+                            );
+                        }
+                    }
+                    self.status_msg = Some(format!("Checked {}...", name));
+                }
+                version_check::VersionMsg::Done(count) => {
+                    self.checking_versions = false;
+                    self.version_check_rx = None;
+                    self.status_msg = Some(format!("Checked {} packages", count));
+                    return;
+                }
             }
         }
-
-        let count = versions.len();
-        self.checking_versions = false;
-        self.status_msg = Some(format!("Force-checked {} packages", count));
     }
 
     /// Poll the build queue for messages from the background thread.

@@ -52,6 +52,7 @@ fn run_tui(void_pkgs: PathBuf) -> Result<()> {
 
     loop {
         app.poll_build();
+        app.poll_version_check();
 
         terminal.draw(|f| ui::draw(f, &app))?;
 
