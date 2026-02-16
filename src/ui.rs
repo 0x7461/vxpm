@@ -2,7 +2,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Cell, Paragraph, Row, Table, Wrap},
+    widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState, Wrap},
     Frame,
 };
 
@@ -33,11 +33,12 @@ fn status_color(status: &Status) -> Color {
     }
 }
 
-pub fn draw(f: &mut Frame, app: &App) {
+pub fn draw(f: &mut Frame, app: &mut App) {
     let panel_height = match app.panel {
         PanelMode::None => 0,
         PanelMode::Detail => 8,
         PanelMode::BuildLog => 12,
+        PanelMode::GitMenu => 10,
     };
 
     let chunks = if panel_height > 0 {
@@ -61,10 +62,10 @@ pub fn draw(f: &mut Frame, app: &App) {
             .split(f.area())
     };
 
-    draw_header(f, chunks[0]);
+    draw_header(f, app, chunks[0]);
 
     match app.view {
-        View::List => draw_package_list(f, app, chunks[1]),
+        View::List => draw_package_list(f, &mut app.table_state, app.selected, &app.packages, chunks[1]),
         View::Tree => draw_tree_view(f, app, chunks[1]),
     }
 
@@ -72,6 +73,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         match app.panel {
             PanelMode::Detail => draw_detail(f, app, chunks[2]),
             PanelMode::BuildLog => draw_build_log(f, app, chunks[2]),
+            PanelMode::GitMenu => draw_git_panel(f, app, chunks[2]),
             PanelMode::None => {}
         }
         draw_status_bar(f, app, chunks[3]);
@@ -80,22 +82,66 @@ pub fn draw(f: &mut Frame, app: &App) {
     }
 }
 
-fn draw_header(f: &mut Frame, area: Rect) {
-    let header = Paragraph::new(Line::from(vec![
+fn draw_header(f: &mut Frame, app: &App, area: Rect) {
+    let mut spans = vec![
         Span::styled(" VPM ", Style::default().fg(BASE).bg(TEAL).add_modifier(Modifier::BOLD)),
         Span::styled(" Void Package Manager", Style::default().fg(TEXT)),
-    ]));
+    ];
+
+    if let Some(ref gs) = app.git_status {
+        spans.push(Span::styled("  ", Style::default()));
+        spans.push(Span::styled(&gs.branch, Style::default().fg(OVERLAY0)));
+
+        if gs.ahead > 0 {
+            spans.push(Span::styled(
+                format!(" | {} ahead", gs.ahead),
+                Style::default().fg(PEACH),
+            ));
+        }
+        if gs.behind > 0 {
+            spans.push(Span::styled(
+                format!(" | {} behind", gs.behind),
+                Style::default().fg(YELLOW),
+            ));
+        }
+
+        if let Some(fetch_time) = gs.last_fetch {
+            if let Ok(elapsed) = fetch_time.elapsed() {
+                let secs = elapsed.as_secs();
+                let label = if secs < 60 {
+                    "just now".to_string()
+                } else if secs < 3600 {
+                    format!("{}m ago", secs / 60)
+                } else if secs < 86400 {
+                    format!("{}h ago", secs / 3600)
+                } else {
+                    format!("{}d ago", secs / 86400)
+                };
+                spans.push(Span::styled(
+                    format!(" | synced {}", label),
+                    Style::default().fg(OVERLAY0),
+                ));
+            }
+        }
+    }
+
+    let header = Paragraph::new(Line::from(spans));
     f.render_widget(header, area);
 }
 
-fn draw_package_list(f: &mut Frame, app: &App, area: Rect) {
+fn draw_package_list(
+    f: &mut Frame,
+    table_state: &mut TableState,
+    selected: usize,
+    packages: &[crate::package::PackageState],
+    area: Rect,
+) {
     let header_cells = ["Package", "Template", "Installed", "Latest", "Status"]
         .iter()
         .map(|h| Cell::from(*h).style(Style::default().fg(TEAL).add_modifier(Modifier::BOLD)));
     let header = Row::new(header_cells).height(1);
 
-    let rows: Vec<Row> = app
-        .packages
+    let rows: Vec<Row> = packages
         .iter()
         .enumerate()
         .map(|(i, ps)| {
@@ -111,13 +157,13 @@ fn draw_package_list(f: &mut Frame, app: &App, area: Rect) {
 
             let latest_display = ps.latest.as_deref().unwrap_or("-").to_string();
 
-            let style = if i == app.selected {
+            let style = if i == selected {
                 Style::default().bg(SURFACE0).fg(TEXT)
             } else {
                 Style::default().fg(TEXT)
             };
 
-            let status_style = if i == app.selected {
+            let status_style = if i == selected {
                 Style::default()
                     .bg(SURFACE0)
                     .fg(status_color(&ps.status))
@@ -149,6 +195,7 @@ fn draw_package_list(f: &mut Frame, app: &App, area: Rect) {
         ],
     )
     .header(header)
+    .row_highlight_style(Style::default()) // highlighting done per-cell above
     .block(
         Block::default()
             .borders(Borders::ALL)
@@ -156,7 +203,8 @@ fn draw_package_list(f: &mut Frame, app: &App, area: Rect) {
             .title_style(Style::default().fg(TEAL)),
     );
 
-    f.render_widget(table, area);
+    table_state.select(Some(selected));
+    f.render_stateful_widget(table, area, table_state);
 }
 
 fn draw_tree_view(f: &mut Frame, app: &App, area: Rect) {
@@ -354,6 +402,99 @@ fn draw_build_log(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(para, area);
 }
 
+fn draw_git_panel(f: &mut Frame, app: &App, area: Rect) {
+    let mut lines: Vec<Line<'static>> = Vec::new();
+
+    if app.git_op_active || !app.git_output.is_empty() {
+        // Show streaming output
+        let available = area.height.saturating_sub(2) as usize; // borders
+        let output = &app.git_output;
+        let start = output.len().saturating_sub(available);
+        for line_text in &output[start..] {
+            let color = if line_text.starts_with("ERR:") { RED } else { TEXT };
+            lines.push(Line::from(Span::styled(
+                format!("  {}", line_text),
+                Style::default().fg(color),
+            )));
+        }
+
+        if !app.git_op_active {
+            // Done — show full menu again below output
+            let used = lines.len();
+            if used + 2 <= available {
+                lines.push(Line::from(""));
+                lines.push(Line::from(vec![
+                    Span::styled("  1", Style::default().fg(TEAL).add_modifier(Modifier::BOLD)),
+                    Span::styled("  Sync master   ", Style::default().fg(TEXT)),
+                    Span::styled("2", Style::default().fg(TEAL).add_modifier(Modifier::BOLD)),
+                    Span::styled("  Rebase custom   ", Style::default().fg(TEXT)),
+                    Span::styled("3", Style::default().fg(TEAL).add_modifier(Modifier::BOLD)),
+                    Span::styled("  Push custom   ", Style::default().fg(TEXT)),
+                    Span::styled("Esc", Style::default().fg(TEAL).add_modifier(Modifier::BOLD)),
+                    Span::styled("  Close", Style::default().fg(TEXT)),
+                ]));
+            }
+        }
+    } else {
+        // Idle — show menu
+        let status_span = if let Some(ref gs) = app.git_status {
+            let mut parts = vec![Span::styled(
+                format!("  {}", gs.branch),
+                Style::default().fg(OVERLAY0),
+            )];
+            if gs.ahead > 0 {
+                parts.push(Span::styled(
+                    format!(" | {} ahead of master", gs.ahead),
+                    Style::default().fg(PEACH),
+                ));
+            }
+            if gs.behind > 0 {
+                parts.push(Span::styled(
+                    format!(" | {} behind master", gs.behind),
+                    Style::default().fg(YELLOW),
+                ));
+            }
+            parts
+        } else {
+            vec![Span::styled(
+                "  (git status unavailable)",
+                Style::default().fg(OVERLAY0),
+            )]
+        };
+
+        lines.push(Line::from(status_span));
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![
+            Span::styled("  1", Style::default().fg(TEAL).add_modifier(Modifier::BOLD)),
+            Span::styled("  Sync master (fetch upstream)", Style::default().fg(TEXT)),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled("  2", Style::default().fg(TEAL).add_modifier(Modifier::BOLD)),
+            Span::styled("  Rebase custom onto master", Style::default().fg(TEXT)),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled("  3", Style::default().fg(TEAL).add_modifier(Modifier::BOLD)),
+            Span::styled("  Push custom (--force-with-lease)", Style::default().fg(TEXT)),
+        ]));
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "  Esc  Close",
+            Style::default().fg(OVERLAY0),
+        )));
+    }
+
+    let para = Paragraph::new(lines).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(SURFACE0))
+            .title(Span::styled(
+                " Git Operations ",
+                Style::default().fg(TEAL).add_modifier(Modifier::BOLD),
+            )),
+    );
+    f.render_widget(para, area);
+}
+
 fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
     let counts = app.status_counts();
 
@@ -400,7 +541,7 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
     // Keybind help
     spans.push(Span::styled("  ", Style::default()));
     spans.push(Span::styled(
-        "j/k:nav  Enter:detail  t:tree  u:upstream  b:build  B:build+deps  q:quit",
+        "j/k:nav  Enter:detail  t:tree  u:upstream  b:build  B:build+deps  g:git  q:quit",
         Style::default().fg(OVERLAY0),
     ));
 

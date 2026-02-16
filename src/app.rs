@@ -3,8 +3,11 @@ use std::sync::atomic::Ordering;
 use std::sync::mpsc::Receiver;
 use std::time::Instant;
 
+use ratatui::widgets::TableState;
+
 use crate::build::{BuildHistory, BuildJob, BuildJobStatus, BuildMsg, BuildQueue};
 use crate::dep_graph::DepGraph;
+use crate::git::{self, GitMsg, GitStatus};
 use crate::package::{Package, PackageState, Status};
 use crate::repo;
 use crate::template;
@@ -21,6 +24,7 @@ pub enum PanelMode {
     None,
     Detail,
     BuildLog,
+    GitMenu,
 }
 
 pub struct App {
@@ -37,6 +41,11 @@ pub struct App {
     pub build_history: BuildHistory,
     pub cancel_pending: Option<Instant>,
     pub version_check_rx: Option<Receiver<version_check::VersionMsg>>,
+    pub git_status: Option<GitStatus>,
+    pub git_op_rx: Option<Receiver<GitMsg>>,
+    pub git_output: Vec<String>,
+    pub git_op_active: bool,
+    pub table_state: TableState,
 }
 
 impl App {
@@ -45,6 +54,8 @@ impl App {
         let packages = repo::load_packages(&void_pkgs, &names);
         let dep_graph = DepGraph::build(&packages);
         let states = repo::build_package_states(&void_pkgs, packages);
+
+        let git_status = git::get_git_status(&void_pkgs);
 
         Ok(App {
             packages: states,
@@ -60,6 +71,11 @@ impl App {
             build_history: BuildHistory::load(),
             cancel_pending: None,
             version_check_rx: None,
+            git_status,
+            git_op_rx: None,
+            git_output: Vec::new(),
+            git_op_active: false,
+            table_state: TableState::default(),
         })
     }
 
@@ -399,6 +415,77 @@ impl App {
         } else {
             self.cancel_pending = Some(Instant::now());
             self.status_msg = Some("Press Esc again to cancel build".to_string());
+        }
+    }
+
+    pub fn refresh_git_status(&mut self) {
+        self.git_status = git::get_git_status(&self.void_pkgs);
+    }
+
+    pub fn open_git_menu(&mut self) {
+        self.panel = match self.panel {
+            PanelMode::GitMenu => PanelMode::None,
+            _ => {
+                self.refresh_git_status();
+                PanelMode::GitMenu
+            }
+        };
+    }
+
+    fn start_git_op(&mut self, op: git::GitOp) {
+        if self.git_op_active {
+            self.status_msg = Some("Git operation already in progress".to_string());
+            return;
+        }
+        self.git_op_active = true;
+        self.git_output.clear();
+        let void_pkgs = self.void_pkgs.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.git_op_rx = Some(rx);
+        std::thread::spawn(move || {
+            git::run_git_op(void_pkgs, op, tx);
+        });
+    }
+
+    pub fn git_sync_master(&mut self) {
+        self.start_git_op(git::GitOp::SyncMaster);
+    }
+
+    pub fn git_rebase_custom(&mut self) {
+        self.start_git_op(git::GitOp::RebaseCustom);
+    }
+
+    pub fn git_push_custom(&mut self) {
+        self.start_git_op(git::GitOp::PushCustom);
+    }
+
+    pub fn poll_git(&mut self) {
+        let msgs: Vec<GitMsg> = if let Some(ref rx) = self.git_op_rx {
+            rx.try_iter().collect()
+        } else {
+            return;
+        };
+
+        for msg in msgs {
+            match msg {
+                GitMsg::Output(line) => {
+                    self.git_output.push(line);
+                }
+                GitMsg::Success(line) => {
+                    self.git_output.push(line.clone());
+                    self.status_msg = Some(line);
+                }
+                GitMsg::Failed(line) => {
+                    self.git_output.push(format!("ERR: {}", line));
+                    self.status_msg = Some(line);
+                }
+                GitMsg::Done => {
+                    self.git_op_active = false;
+                    self.git_op_rx = None;
+                    self.refresh_git_status();
+                    return;
+                }
+            }
         }
     }
 

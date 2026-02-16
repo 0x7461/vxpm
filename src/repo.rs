@@ -9,10 +9,10 @@ use crate::package::{self, Package, PackageState};
 /// Discover custom packages by diffing master..custom branches.
 pub fn discover_custom_packages(void_pkgs: &Path) -> Result<Vec<String>> {
     let output = Command::new("git")
-        .args(["diff", "--name-only", "master..custom", "--", "srcpkgs/"])
+        .args(["log", "--name-only", "--pretty=format:", "master..custom", "--", "srcpkgs/"])
         .current_dir(void_pkgs)
         .output()
-        .context("running git diff")?;
+        .context("running git log")?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let mut names: HashSet<String> = HashSet::new();

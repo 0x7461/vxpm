@@ -1,6 +1,7 @@
 mod app;
 mod build;
 mod dep_graph;
+mod git;
 mod package;
 mod repo;
 mod template;
@@ -53,8 +54,9 @@ fn run_tui(void_pkgs: PathBuf) -> Result<()> {
     loop {
         app.poll_build();
         app.poll_version_check();
+        app.poll_git();
 
-        terminal.draw(|f| ui::draw(f, &app))?;
+        terminal.draw(|f| ui::draw(f, &mut app))?;
 
         if event::poll(Duration::from_millis(100))? {
             if let Event::Key(key) = event::read()? {
@@ -75,6 +77,16 @@ fn run_tui(void_pkgs: PathBuf) -> Result<()> {
                     KeyCode::Char('r') => app.refresh(),
                     KeyCode::Char('b') => app.build_selected(),
                     KeyCode::Char('B') => app.build_with_dependents(),
+                    KeyCode::Char('g') => app.open_git_menu(),
+                    KeyCode::Char('1') if app.panel == app::PanelMode::GitMenu && !app.git_op_active => {
+                        app.git_sync_master();
+                    }
+                    KeyCode::Char('2') if app.panel == app::PanelMode::GitMenu && !app.git_op_active => {
+                        app.git_rebase_custom();
+                    }
+                    KeyCode::Char('3') if app.panel == app::PanelMode::GitMenu && !app.git_op_active => {
+                        app.git_push_custom();
+                    }
                     KeyCode::Esc => {
                         if app.build_queue.active {
                             app.cancel_build();
