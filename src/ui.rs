@@ -64,8 +64,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 
     draw_header(f, app, chunks[0]);
 
+    let visible_indices: Vec<usize> = app.visible_packages().iter().map(|(i, _)| *i).collect();
     match app.view {
-        View::List => draw_package_list(f, &mut app.table_state, app.selected, &app.packages, chunks[1]),
+        View::List => draw_package_list(f, &mut app.table_state, app.selected, &app.packages, &visible_indices, chunks[1]),
         View::Tree => draw_tree_view(f, app, chunks[1]),
     }
 
@@ -125,6 +126,26 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
         }
     }
 
+    // Filter indicator
+    if app.filter_active {
+        spans.push(Span::styled("  / ", Style::default().fg(TEAL).add_modifier(Modifier::BOLD)));
+        spans.push(Span::styled(&app.filter, Style::default().fg(TEXT)));
+        spans.push(Span::styled("█", Style::default().fg(TEXT)));
+        let visible_len = app.visible_packages().len();
+        spans.push(Span::styled(
+            format!("  {}/{}", visible_len, app.packages.len()),
+            Style::default().fg(OVERLAY0),
+        ));
+    } else if !app.filter.is_empty() {
+        spans.push(Span::styled("  filter: ", Style::default().fg(OVERLAY0)));
+        spans.push(Span::styled(&app.filter, Style::default().fg(TEXT)));
+        let visible_len = app.visible_packages().len();
+        spans.push(Span::styled(
+            format!("  {}/{}", visible_len, app.packages.len()),
+            Style::default().fg(OVERLAY0),
+        ));
+    }
+
     let header = Paragraph::new(Line::from(spans));
     f.render_widget(header, area);
 }
@@ -134,6 +155,7 @@ fn draw_package_list(
     table_state: &mut TableState,
     selected: usize,
     packages: &[crate::package::PackageState],
+    visible_indices: &[usize],
     area: Rect,
 ) {
     let header_cells = ["Package", "Template", "Installed", "Latest", "Status"]
@@ -141,10 +163,11 @@ fn draw_package_list(
         .map(|h| Cell::from(*h).style(Style::default().fg(TEAL).add_modifier(Modifier::BOLD)));
     let header = Row::new(header_cells).height(1);
 
-    let rows: Vec<Row> = packages
+    let rows: Vec<Row> = visible_indices
         .iter()
         .enumerate()
-        .map(|(i, ps)| {
+        .map(|(i, &orig_idx)| {
+            let ps = &packages[orig_idx];
             let installed_display = ps
                 .installed
                 .as_ref()
@@ -541,7 +564,7 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
     // Keybind help
     spans.push(Span::styled("  ", Style::default()));
     spans.push(Span::styled(
-        "j/k:nav  Enter:detail  t:tree  u:upstream  b:build  B:build+deps  g:git  q:quit",
+        "j/k:nav  /:search  Enter:detail  t:tree  u:upstream  b:build  B:build+deps  g:git  q:quit",
         Style::default().fg(OVERLAY0),
     ));
 

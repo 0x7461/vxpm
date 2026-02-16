@@ -66,37 +66,51 @@ fn run_tui(void_pkgs: PathBuf) -> Result<()> {
                     break;
                 }
 
-                match key.code {
-                    KeyCode::Char('q') => break,
-                    KeyCode::Char('j') | KeyCode::Down => app.move_down(),
-                    KeyCode::Char('k') | KeyCode::Up => app.move_up(),
-                    KeyCode::Enter => app.toggle_detail(),
-                    KeyCode::Char('t') => app.toggle_tree(),
-                    KeyCode::Char('u') => app.check_versions(),
-                    KeyCode::Char('U') => app.bump_and_build(),
-                    KeyCode::Char('r') => app.refresh(),
-                    KeyCode::Char('b') => app.build_selected(),
-                    KeyCode::Char('B') => app.build_with_dependents(),
-                    KeyCode::Char('g') => app.open_git_menu(),
-                    KeyCode::Char('1') if app.panel == app::PanelMode::GitMenu && !app.git_op_active => {
-                        app.git_sync_master();
+                if app.filter_active {
+                    match key.code {
+                        KeyCode::Esc => app.stop_filter(true),
+                        KeyCode::Enter => app.stop_filter(false),
+                        KeyCode::Backspace => app.filter_backspace(),
+                        KeyCode::Char(c) => app.filter_input(c),
+                        _ => {}
                     }
-                    KeyCode::Char('2') if app.panel == app::PanelMode::GitMenu && !app.git_op_active => {
-                        app.git_rebase_custom();
-                    }
-                    KeyCode::Char('3') if app.panel == app::PanelMode::GitMenu && !app.git_op_active => {
-                        app.git_push_custom();
-                    }
-                    KeyCode::Esc => {
-                        if app.build_queue.active {
-                            app.cancel_build();
-                        } else if app.panel != app::PanelMode::None {
-                            app.panel = app::PanelMode::None;
-                        } else if app.view == app::View::Tree {
-                            app.view = app::View::List;
+                } else {
+                    match key.code {
+                        KeyCode::Char('q') => break,
+                        KeyCode::Char('/') => app.start_filter(),
+                        KeyCode::Char('j') | KeyCode::Down => app.move_down(),
+                        KeyCode::Char('k') | KeyCode::Up => app.move_up(),
+                        KeyCode::Enter => app.toggle_detail(),
+                        KeyCode::Char('t') => app.toggle_tree(),
+                        KeyCode::Char('u') => app.check_versions(),
+                        KeyCode::Char('U') => app.bump_and_build(),
+                        KeyCode::Char('r') => app.refresh(),
+                        KeyCode::Char('b') => app.build_selected(),
+                        KeyCode::Char('B') => app.build_with_dependents(),
+                        KeyCode::Char('g') => app.open_git_menu(),
+                        KeyCode::Char('1') if app.panel == app::PanelMode::GitMenu && !app.git_op_active => {
+                            app.git_sync_master();
                         }
+                        KeyCode::Char('2') if app.panel == app::PanelMode::GitMenu && !app.git_op_active => {
+                            app.git_rebase_custom();
+                        }
+                        KeyCode::Char('3') if app.panel == app::PanelMode::GitMenu && !app.git_op_active => {
+                            app.git_push_custom();
+                        }
+                        KeyCode::Esc => {
+                            if app.build_queue.active {
+                                app.cancel_build();
+                            } else if !app.filter.is_empty() {
+                                app.filter.clear();
+                                app.selected = 0;
+                            } else if app.panel != app::PanelMode::None {
+                                app.panel = app::PanelMode::None;
+                            } else if app.view == app::View::Tree {
+                                app.view = app::View::List;
+                            }
+                        }
+                        _ => {}
                     }
-                    _ => {}
                 }
             }
         }

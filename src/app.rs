@@ -46,6 +46,8 @@ pub struct App {
     pub git_output: Vec<String>,
     pub git_op_active: bool,
     pub table_state: TableState,
+    pub filter: String,
+    pub filter_active: bool,
 }
 
 impl App {
@@ -76,11 +78,28 @@ impl App {
             git_output: Vec::new(),
             git_op_active: false,
             table_state: TableState::default(),
+            filter: String::new(),
+            filter_active: false,
         })
     }
 
+    /// Returns (original_index, &PackageState) for packages matching the current filter.
+    pub fn visible_packages(&self) -> Vec<(usize, &PackageState)> {
+        if self.filter.is_empty() {
+            self.packages.iter().enumerate().collect()
+        } else {
+            let filter_lower = self.filter.to_lowercase();
+            self.packages
+                .iter()
+                .enumerate()
+                .filter(|(_, p)| p.package.name.to_lowercase().contains(&filter_lower))
+                .collect()
+        }
+    }
+
     pub fn selected_package(&self) -> Option<&PackageState> {
-        self.packages.get(self.selected)
+        let visible = self.visible_packages();
+        visible.get(self.selected).map(|(_, p)| *p)
     }
 
     pub fn move_up(&mut self) {
@@ -90,8 +109,33 @@ impl App {
     }
 
     pub fn move_down(&mut self) {
-        if self.selected + 1 < self.packages.len() {
+        let visible_len = self.visible_packages().len();
+        if self.selected + 1 < visible_len {
             self.selected += 1;
+        }
+    }
+
+    pub fn start_filter(&mut self) {
+        self.filter_active = true;
+        self.filter.clear();
+        self.selected = 0;
+    }
+
+    pub fn filter_input(&mut self, c: char) {
+        self.filter.push(c);
+        self.selected = 0;
+    }
+
+    pub fn filter_backspace(&mut self) {
+        self.filter.pop();
+        self.selected = 0;
+    }
+
+    pub fn stop_filter(&mut self, clear: bool) {
+        self.filter_active = false;
+        if clear {
+            self.filter.clear();
+            self.selected = 0;
         }
     }
 
@@ -149,8 +193,9 @@ impl App {
             }
 
             self.packages = states;
-            if self.selected >= self.packages.len() {
-                self.selected = self.packages.len().saturating_sub(1);
+            let visible_len = self.visible_packages().len();
+            if self.selected >= visible_len {
+                self.selected = visible_len.saturating_sub(1);
             }
             self.status_msg = Some("Refreshed".to_string());
         }
