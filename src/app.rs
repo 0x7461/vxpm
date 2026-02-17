@@ -5,7 +5,7 @@ use std::time::Instant;
 
 use ratatui::widgets::TableState;
 
-use crate::build::{BuildHistory, BuildJob, BuildJobStatus, BuildMsg, BuildQueue};
+use crate::build::{self, BuildHistory, BuildJob, BuildJobStatus, BuildMsg, BuildQueue};
 use crate::dep_graph::DepGraph;
 use crate::gcc::GccInfo;
 use crate::git::{self, GitMsg, GitStatus};
@@ -52,6 +52,7 @@ pub struct App {
     pub filter_active: bool,
     pub shlib_map: ShlibMap,
     pub gcc_info: GccInfo,
+    pub shlib_updates: Vec<(String, String, String, String)>, // (pkg, old_so, new_so, new_pkgver)
 }
 
 impl App {
@@ -73,6 +74,9 @@ impl App {
                     shlibs::check_soname_mismatches(entries, &state.package.name);
             }
         }
+
+        // Prune old build logs at startup
+        build::prune_build_logs(5);
 
         Ok(App {
             packages: states,
@@ -97,6 +101,7 @@ impl App {
             filter_active: false,
             shlib_map,
             gcc_info,
+            shlib_updates: Vec::new(),
         })
     }
 
@@ -319,24 +324,46 @@ impl App {
                         self.build_queue.current_output.drain(..drain);
                     }
                 }
-                BuildMsg::Finished(name) => {
+                BuildMsg::Finished(name, log_path) => {
                     for job in &mut self.build_queue.jobs {
                         if job.name == name {
                             job.status = BuildJobStatus::Success;
                         }
                     }
+                    // Store log path and check for shlib updates
+                    let log_str = log_path.to_string_lossy().to_string();
+                    for state in &mut self.packages {
+                        if state.package.name == name {
+                            state.build_log = Some(log_str.clone());
+                            // Check for pending shlib updates
+                            for mm in &state.soname_mismatches {
+                                let pkg_ver = format!(
+                                    "{}-{}_{}",
+                                    state.package.name, state.package.version, state.package.revision
+                                );
+                                self.shlib_updates.push((
+                                    state.package.name.clone(),
+                                    mm.registered.clone(),
+                                    mm.installed.clone(),
+                                    pkg_ver,
+                                ));
+                            }
+                        }
+                    }
                     self.build_history.record(&name, true);
                 }
-                BuildMsg::Failed(name, error_lines) => {
+                BuildMsg::Failed(name, error_lines, log_path) => {
                     for job in &mut self.build_queue.jobs {
                         if job.name == name {
                             job.status = BuildJobStatus::Failed;
                         }
                     }
-                    // Set BuildFailed status on the package
+                    // Set BuildFailed status and store log path
+                    let log_str = log_path.to_string_lossy().to_string();
                     for state in &mut self.packages {
                         if state.package.name == name {
                             state.status = Status::BuildFailed;
+                            state.build_log = Some(log_str.clone());
                         }
                     }
                     // Append error lines to output
@@ -498,6 +525,136 @@ impl App {
                 self.status_msg = Some(format!("Bump failed: {}", e));
             }
         }
+    }
+
+    /// Rebuild all custom packages in topological order.
+    pub fn rebuild_all(&mut self) {
+        if self.build_queue.active {
+            self.status_msg = Some("Build already in progress".to_string());
+            return;
+        }
+
+        let topo = self.dep_graph.topological_sort();
+
+        // Filter out GCC-blocked packages
+        let blocked: Vec<String> = topo.iter().filter(|n| self.gcc_info.is_blocked(n)).cloned().collect();
+        let queue: Vec<String> = topo.into_iter().filter(|n| !self.gcc_info.is_blocked(n)).collect();
+
+        if queue.is_empty() {
+            self.status_msg = Some("No packages to build".to_string());
+            return;
+        }
+
+        let msg = if blocked.is_empty() {
+            format!("Rebuilding {} packages...", queue.len())
+        } else {
+            format!(
+                "Rebuilding {} packages ({} skipped: GCC blocked)",
+                queue.len(),
+                blocked.len()
+            )
+        };
+        self.status_msg = Some(msg);
+
+        self.build_queue.jobs = queue
+            .into_iter()
+            .map(|n| BuildJob {
+                name: n,
+                status: BuildJobStatus::Pending,
+            })
+            .collect();
+        self.build_queue.start(self.void_pkgs.clone());
+        self.panel = PanelMode::BuildLog;
+    }
+
+    /// Bump all UPDATE AVAIL packages and queue builds.
+    pub fn update_all(&mut self) {
+        if self.build_queue.active {
+            self.status_msg = Some("Build already in progress".to_string());
+            return;
+        }
+
+        let updatable: Vec<(String, String)> = self
+            .packages
+            .iter()
+            .filter(|p| p.status == Status::UpdateAvailable)
+            .filter_map(|p| {
+                p.latest
+                    .as_ref()
+                    .map(|v| (p.package.name.clone(), v.clone()))
+            })
+            .collect();
+
+        if updatable.is_empty() {
+            self.status_msg = Some("No packages with updates available".to_string());
+            return;
+        }
+
+        // Bump each template
+        let mut bumped = Vec::new();
+        let mut failed = Vec::new();
+        for (name, latest) in &updatable {
+            if self.gcc_info.is_blocked(name) {
+                continue;
+            }
+            match template::bump_template(&self.void_pkgs, name, latest) {
+                Ok(_) => bumped.push(name.clone()),
+                Err(e) => failed.push(format!("{}: {}", name, e)),
+            }
+        }
+
+        if bumped.is_empty() {
+            self.status_msg = Some("No packages bumped successfully".to_string());
+            return;
+        }
+
+        self.refresh();
+
+        // Build bumped packages + their dependents in topo order
+        let dependents = self.dep_graph.rebuild_set(&bumped);
+        let mut all: Vec<String> = bumped.clone();
+        all.extend(dependents);
+
+        // Deduplicate and order by topo sort
+        let topo = self.dep_graph.topological_sort();
+        let all_set: std::collections::HashSet<String> = all.into_iter().collect();
+        let ordered: Vec<String> = topo.into_iter().filter(|n| all_set.contains(n)).collect();
+
+        self.status_msg = Some(format!(
+            "Bumped {} packages, building {}...",
+            bumped.len(),
+            ordered.len()
+        ));
+
+        self.build_queue.jobs = ordered
+            .into_iter()
+            .map(|n| BuildJob {
+                name: n,
+                status: BuildJobStatus::Pending,
+            })
+            .collect();
+        self.build_queue.start(self.void_pkgs.clone());
+        self.panel = PanelMode::BuildLog;
+    }
+
+    /// Apply pending shlib updates to common/shlibs.
+    pub fn apply_shlib_updates(&mut self) {
+        if self.shlib_updates.is_empty() {
+            return;
+        }
+
+        let updates: Vec<(String, String, String)> = self
+            .shlib_updates
+            .iter()
+            .map(|(_, old, new, pkgver)| (old.clone(), new.clone(), pkgver.clone()))
+            .collect();
+
+        shlibs::update_shlibs_file(&self.void_pkgs, &updates);
+
+        let count = self.shlib_updates.len();
+        self.shlib_updates.clear();
+        self.refresh();
+        self.status_msg = Some(format!("Updated {} shlib entries", count));
     }
 
     /// Handle cancel build: double-Esc within 2 seconds.

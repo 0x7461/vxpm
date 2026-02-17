@@ -32,6 +32,8 @@ pub struct PackageState {
     pub shlibs: Vec<ShlibEntry>,
     #[serde(skip)]
     pub soname_mismatches: Vec<SonameMismatch>,
+    #[serde(skip)]
+    pub build_log: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]

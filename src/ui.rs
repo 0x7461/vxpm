@@ -413,6 +413,15 @@ fn draw_detail(f: &mut Frame, app: &App, area: Rect) {
         lines.push(Line::from(shlib_spans));
     }
 
+    // Build log path
+    if let Some(ref log_path) = selected.build_log {
+        let log_color = if selected.status == Status::BuildFailed { RED } else { TEXT };
+        lines.push(Line::from(vec![
+            Span::styled("  Build log: ", Style::default().fg(OVERLAY0)),
+            Span::styled(log_path.clone(), Style::default().fg(log_color)),
+        ]));
+    }
+
     // GCC requirement line
     if app.gcc_info.is_blocked(&pkg.name) {
         let req = app.gcc_info.required_version(&pkg.name).unwrap_or_default();
@@ -626,10 +635,19 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
         spans.push(Span::styled(msg.clone(), Style::default().fg(OVERLAY0)));
     }
 
+    // Shlib update indicator
+    if !app.shlib_updates.is_empty() {
+        spans.push(Span::styled("  ", Style::default()));
+        spans.push(Span::styled(
+            format!("{} shlib updates  S:apply", app.shlib_updates.len()),
+            Style::default().fg(PEACH),
+        ));
+    }
+
     // Keybind help
     spans.push(Span::styled("  ", Style::default()));
     spans.push(Span::styled(
-        "j/k:nav  /:search  Enter:detail  t:tree  u:upstream  b:build  B:build+deps  g:git  q:quit",
+        "j/k:nav  /:search  Enter:detail  t:tree  u:upstream  b:build  B:deps  R:all  A:update-all  g:git  q:quit",
         Style::default().fg(OVERLAY0),
     ));
 

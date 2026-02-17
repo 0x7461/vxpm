@@ -144,55 +144,63 @@ Keybind: `U` on a package with UPDATE AVAIL status.
 
 ---
 
-## Phase 5: Polish & Quality of Life
+## Phase 5: Polish & Quality of Life [DONE]
+
+### Files
+
+```
+src/
+├── shlibs.rs    # SONAME tracking: parse common/shlibs, readelf, mismatch detection, auto-update
+├── gcc.rs       # GCC version gate: detect version, load requirements, block builds
+└── config.rs    # Config file: ~/.config/vpm/config.toml with ~ expansion
+```
 
 ### 5a: Search/Filter
 
-- `/` opens search input, filters package list by name
-- `Esc` clears filter and returns to full list
-- Filter state shown in header or status bar
+- `/` opens search input, filters package list by name (case-insensitive)
+- `Esc` clears filter, `Enter` confirms
+- Filter state shown in header: `filter: xyz 12/24`
 
 ### 5b: SONAME Tracking
 
-- Parse `common/shlibs` to know current registered SONAMEs per package
-- After build, detect SONAME changes (run `objdump -p` or parse xbps-src output)
-- Warn when a SONAME bump would break dependents
-- Relevant: hyprgraphics .so.0 → .so.4 broke hyprland/hyprpaper
+- Parse `common/shlibs` at startup, compare against installed libs via `readelf -d`
+- Detail panel shows per-SONAME OK/MISMATCH indicators
+- Package list shows `!so` badge in PEACH for mismatched packages
 
 ### 5c: GCC Version Gate
 
-- Detect system GCC version on startup (`gcc -dumpversion`)
-- Store known minimum compiler requirements per package (or detect from build errors)
-- Warn before building packages that need GCC 15+ (Hyprland 0.53 blocker)
+- Detect system GCC via `gcc -dumpversion`, show in header
+- Requirements in `~/.config/vpm/gcc_requirements.toml` (`[requirements]` table, `pkg = "major.minor"`)
+- GCC-blocked packages show `GCC 15+` badge in RED, builds refused with warning
+- Guards on `build_selected`, `build_with_dependents`, `bump_and_build`, `rebuild_all`, `update_all`
 
 ### 5d: Bulk Operations
 
-- "Rebuild all" — queue all custom packages in topological order
-- "Update all" — bump + build all packages with UPDATE AVAIL status
-- Essential for when GCC 15 lands and the whole ecosystem needs rebuilding
+- `R` — rebuild all custom packages in topological order (GCC-blocked skipped with warning)
+- `A` — bump all UPDATE AVAIL packages, build them + dependents in topo order
 
 ### 5e: `common/shlibs` Auto-Update
 
-- After a successful build with a new SONAME, offer to update `common/shlibs`
-- Parse built .xbps to detect shared libraries and their SONAMEs
-- Prevents "UNKNOWN PKG PLEASE FIX!" errors on subsequent builds
+- After successful build with SONAME mismatch, queues pending shlib updates
+- `S` keybind appears in status bar when updates pending; applies changes to `common/shlibs`
 
-### 5f: Install Integration
-
-- After successful build, offer to run `xi <packages>` (with confirmation)
-- Show the xi command prominently (already done), but add a keybind to execute it
-- Needs sudo — spawn in user's terminal or use `pkexec`
+### 5f: Install Integration — Skipped (needs sudo)
 
 ### 5g: Build Log Persistence
 
-- Save full build logs to `~/.cache/vpm/logs/<pkg>-<timestamp>.log`
-- Detail panel shows path to log file for failed builds
-- Keep last N logs per package, prune old ones
+- Full build output saved to `~/.cache/vpm/logs/<pkg>-<YYYYMMDD-HHMMSS>.log`
+- Error lines appended to log on failure
+- Detail panel shows log path (RED for failed builds)
+- Old logs pruned to 5 per package at startup
 
 ### 5h: Config File
 
-- `~/.config/vpm/config.toml` — void-packages path, custom keybinds, etc.
-- Removes hardcoded `~/void-packages` path from main.rs
+- `~/.config/vpm/config.toml` — bootstrapped on first run
+- `void_packages` key with `~` expansion, replaces hardcoded path
+
+### Keybinds (complete)
+
+`j/k` navigate, `/` search, `Enter` detail, `t` tree, `u` upstream, `U` bump+build, `r` refresh, `b` build, `B` build+deps, `R` rebuild all, `A` update all, `S` apply shlib updates, `g` git menu, `Esc` back/cancel, `q`/`Ctrl+C` quit
 
 ---
 
@@ -204,14 +212,14 @@ Keybind: `U` on a package with UPDATE AVAIL status.
 | 2 | Interactive dashboard with dep tree, full status pipeline | Done |
 | 3 | Template bumping + build orchestration with auto-rebuild queue | Done |
 | 4 | Git sync/rebase from TUI | Done |
-| 5a | Search/filter packages | Planned |
-| 5b | SONAME tracking | Planned |
-| 5c | GCC version gate | Planned |
-| 5d | Bulk operations (rebuild all, update all) | Planned |
-| 5e | common/shlibs auto-update | Planned |
-| 5f | Install integration (xi keybind) | Planned |
-| 5g | Build log persistence | Planned |
-| 5h | Config file | Planned |
+| 5a | Search/filter packages | Done |
+| 5b | SONAME tracking | Done |
+| 5c | GCC version gate | Done |
+| 5d | Bulk operations (rebuild all, update all) | Done |
+| 5e | common/shlibs auto-update | Done |
+| 5f | Install integration (xi keybind) | Skipped (needs sudo) |
+| 5g | Build log persistence | Done |
+| 5h | Config file | Done |
 
 ---
 

@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
-use std::io::BufRead;
+use std::collections::HashMap;
+use std::io::{BufRead, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -23,9 +24,9 @@ pub struct BuildJob {
 
 pub enum BuildMsg {
     Started(String),
-    Output(String, String), // (name, line)
-    Finished(String),
-    Failed(String, Vec<String>), // (name, last N error lines)
+    Output(String, String),                    // (name, line)
+    Finished(String, PathBuf),                 // (name, log_path)
+    Failed(String, Vec<String>, PathBuf),      // (name, last N error lines, log_path)
     QueueComplete,
 }
 
@@ -81,6 +82,120 @@ impl BuildHistory {
     }
 }
 
+// --- Build Log Persistence ---
+
+struct BuildLog {
+    file: std::fs::File,
+    path: PathBuf,
+}
+
+impl BuildLog {
+    fn new(pkg_name: &str) -> Option<Self> {
+        let dir = log_dir();
+        let _ = std::fs::create_dir_all(&dir);
+
+        let now = chrono_timestamp();
+        let filename = format!("{}-{}.log", pkg_name, now);
+        let path = dir.join(filename);
+
+        match std::fs::File::create(&path) {
+            Ok(file) => Some(BuildLog { file, path }),
+            Err(_) => None,
+        }
+    }
+
+    fn write_line(&mut self, line: &str) {
+        let _ = writeln!(self.file, "{}", line);
+    }
+
+    fn finish(self) -> PathBuf {
+        self.path
+    }
+}
+
+fn log_dir() -> PathBuf {
+    let cache = std::env::var("XDG_CACHE_HOME")
+        .unwrap_or_else(|_| format!("{}/.cache", env!("HOME")));
+    PathBuf::from(cache).join("vpm/logs")
+}
+
+fn chrono_timestamp() -> String {
+    // YYYYMMDD-HHMMSS without pulling in chrono crate
+    let secs = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    // Simple UTC conversion
+    let days = secs / 86400;
+    let time_of_day = secs % 86400;
+    let hours = time_of_day / 3600;
+    let minutes = (time_of_day % 3600) / 60;
+    let seconds = time_of_day % 60;
+
+    // Days since epoch to Y/M/D (simplified Gregorian)
+    let (year, month, day) = days_to_ymd(days);
+
+    format!(
+        "{:04}{:02}{:02}-{:02}{:02}{:02}",
+        year, month, day, hours, minutes, seconds
+    )
+}
+
+fn days_to_ymd(days: u64) -> (u64, u64, u64) {
+    // Algorithm from http://howardhinnant.github.io/date_algorithms.html
+    let z = days + 719468;
+    let era = z / 146097;
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    (y, m, d)
+}
+
+/// Prune old build logs, keeping at most `max_per_pkg` per package.
+pub fn prune_build_logs(max_per_pkg: usize) {
+    let dir = log_dir();
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+
+    let mut by_pkg: HashMap<String, Vec<PathBuf>> = HashMap::new();
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().map(|e| e == "log").unwrap_or(false) {
+            if let Some(filename) = path.file_stem().and_then(|s| s.to_str()) {
+                // Format: pkgname-YYYYMMDD-HHMMSS
+                // Find the timestamp part (last 15 chars: YYYYMMDD-HHMMSS)
+                if filename.len() > 16 {
+                    let pkg = &filename[..filename.len() - 16]; // strip "-YYYYMMDD-HHMMSS"
+                    by_pkg.entry(pkg.to_string()).or_default().push(path);
+                }
+            }
+        }
+    }
+
+    for (_pkg, mut logs) in by_pkg {
+        if logs.len() <= max_per_pkg {
+            continue;
+        }
+        logs.sort();
+        // Oldest first (filenames sort chronologically), remove excess
+        let to_remove = logs.len() - max_per_pkg;
+        for path in &logs[..to_remove] {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+// --- Build Queue ---
+
 pub struct BuildQueue {
     pub jobs: Vec<BuildJob>,
     pub current_output: Vec<String>,
@@ -129,6 +244,7 @@ fn run_build_queue(void_pkgs: PathBuf, names: Vec<String>, tx: Sender<BuildMsg>,
         }
 
         let _ = tx.send(BuildMsg::Started(name.clone()));
+        let mut build_log = BuildLog::new(name);
 
         let result = Command::new("./xbps-src")
             .args(["pkg", name])
@@ -148,14 +264,19 @@ fn run_build_queue(void_pkgs: PathBuf, names: Vec<String>, tx: Sender<BuildMsg>,
                             break;
                         }
                         if let Ok(line) = line {
+                            if let Some(ref mut log) = build_log {
+                                log.write_line(&line);
+                            }
                             let _ = tx.send(BuildMsg::Output(name.clone(), line));
                         }
                     }
                 }
 
+                let log_path = build_log.map(|l| l.finish()).unwrap_or_default();
+
                 match child.wait() {
                     Ok(status) if status.success() => {
-                        let _ = tx.send(BuildMsg::Finished(name.clone()));
+                        let _ = tx.send(BuildMsg::Finished(name.clone(), log_path));
                     }
                     Ok(_) => {
                         // Capture stderr for error info
@@ -167,15 +288,24 @@ fn run_build_queue(void_pkgs: PathBuf, names: Vec<String>, tx: Sender<BuildMsg>,
                         } else {
                             vec!["Build failed with non-zero exit code".to_string()]
                         };
-                        let _ = tx.send(BuildMsg::Failed(name.clone(), error_lines));
+                        // Write errors to log too
+                        if log_path != PathBuf::new() {
+                            if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open(&log_path) {
+                                for line in &error_lines {
+                                    let _ = writeln!(f, "ERR: {}", line);
+                                }
+                            }
+                        }
+                        let _ = tx.send(BuildMsg::Failed(name.clone(), error_lines, log_path));
                     }
                     Err(e) => {
-                        let _ = tx.send(BuildMsg::Failed(name.clone(), vec![e.to_string()]));
+                        let _ = tx.send(BuildMsg::Failed(name.clone(), vec![e.to_string()], log_path));
                     }
                 }
             }
             Err(e) => {
-                let _ = tx.send(BuildMsg::Failed(name.clone(), vec![e.to_string()]));
+                let log_path = build_log.map(|l| l.finish()).unwrap_or_default();
+                let _ = tx.send(BuildMsg::Failed(name.clone(), vec![e.to_string()], log_path));
             }
         }
     }

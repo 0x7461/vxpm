@@ -148,6 +148,44 @@ pub fn check_soname_mismatches(
     mismatches
 }
 
+/// Update common/shlibs file with new SONAME entries.
+/// Each tuple is (old_soname, new_soname, new_pkg_ver).
+pub fn update_shlibs_file(void_pkgs: &Path, updates: &[(String, String, String)]) {
+    let shlibs_path = void_pkgs.join("common/shlibs");
+    let content = match std::fs::read_to_string(&shlibs_path) {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+
+    let mut lines: Vec<String> = content.lines().map(|l| l.to_string()).collect();
+
+    for (old_soname, new_soname, new_pkg_ver) in updates {
+        // Skip "not found" entries — can't update what doesn't exist
+        if new_soname == "not found" {
+            continue;
+        }
+        for line in &mut lines {
+            let trimmed = line.trim();
+            if trimmed.starts_with(old_soname) {
+                let after = &trimmed[old_soname.len()..];
+                if after.starts_with(' ') || after.starts_with('\t') {
+                    *line = format!("{} {}", new_soname, new_pkg_ver);
+                }
+            }
+        }
+    }
+
+    let new_content = lines.join("\n");
+    // Preserve trailing newline if original had one
+    let final_content = if content.ends_with('\n') {
+        format!("{}\n", new_content)
+    } else {
+        new_content
+    };
+
+    let _ = std::fs::write(&shlibs_path, final_content);
+}
+
 /// Extract base library name: "libfoo.so.4" -> "libfoo.so"
 fn soname_base(soname: &str) -> &str {
     match soname.find(".so.") {

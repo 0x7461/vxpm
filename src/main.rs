@@ -1,5 +1,6 @@
 mod app;
 mod build;
+mod config;
 mod dep_graph;
 mod gcc;
 mod git;
@@ -11,7 +12,6 @@ mod ui;
 mod version_check;
 
 use std::io;
-use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -24,26 +24,26 @@ use ratatui::prelude::*;
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
-    let void_pkgs = PathBuf::from(format!("{}/void-packages", env!("HOME")));
+    let cfg = config::load();
 
     if args.len() > 1 && args[1] == "dump" {
-        return dump(&void_pkgs);
+        return dump(&cfg);
     }
 
-    run_tui(void_pkgs)
+    run_tui(cfg)
 }
 
-fn dump(void_pkgs: &PathBuf) -> Result<()> {
-    let names = repo::discover_custom_packages(void_pkgs)?;
-    let packages = repo::load_packages(void_pkgs, &names);
-    let states = repo::build_package_states(void_pkgs, packages);
+fn dump(cfg: &config::Config) -> Result<()> {
+    let names = repo::discover_custom_packages(&cfg.void_packages)?;
+    let packages = repo::load_packages(&cfg.void_packages, &names);
+    let states = repo::build_package_states(&cfg.void_packages, packages);
 
     let json = serde_json::to_string_pretty(&states)?;
     println!("{}", json);
     Ok(())
 }
 
-fn run_tui(void_pkgs: PathBuf) -> Result<()> {
+fn run_tui(cfg: config::Config) -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
@@ -51,7 +51,7 @@ fn run_tui(void_pkgs: PathBuf) -> Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let mut app = app::App::new(void_pkgs)?;
+    let mut app = app::App::new(cfg.void_packages)?;
 
     loop {
         app.poll_build();
@@ -89,6 +89,11 @@ fn run_tui(void_pkgs: PathBuf) -> Result<()> {
                         KeyCode::Char('r') => app.refresh(),
                         KeyCode::Char('b') => app.build_selected(),
                         KeyCode::Char('B') => app.build_with_dependents(),
+                        KeyCode::Char('R') => app.rebuild_all(),
+                        KeyCode::Char('A') => app.update_all(),
+                        KeyCode::Char('S') if !app.shlib_updates.is_empty() => {
+                            app.apply_shlib_updates();
+                        }
                         KeyCode::Char('g') => app.open_git_menu(),
                         KeyCode::Char('1') if app.panel == app::PanelMode::GitMenu && !app.git_op_active => {
                             app.git_sync_master();

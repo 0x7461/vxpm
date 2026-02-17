@@ -137,6 +137,7 @@ pub fn build_package_states(void_pkgs: &Path, packages: Vec<Package>) -> Vec<Pac
                 status,
                 shlibs: Vec::new(),
                 soname_mismatches: Vec::new(),
+                build_log: None,
             }
         })
         .collect()
