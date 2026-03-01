@@ -53,6 +53,8 @@ pub struct App {
     pub shlib_map: ShlibMap,
     pub gcc_info: GccInfo,
     pub shlib_updates: Vec<(String, String, String, String)>, // (pkg, old_so, new_so, new_pkgver)
+    pub build_log_scroll: usize, // lines offset from bottom; 0 = follow tail
+    pub pkg_last_checked: Option<u64>, // unix timestamp of last pkg upstream check
 }
 
 impl App {
@@ -86,7 +88,7 @@ impl App {
             void_pkgs,
             panel: PanelMode::None,
             checking_versions: false,
-            status_msg: Some("Press 'u' to check upstream versions".to_string()),
+            status_msg: None,
             should_quit: false,
             build_queue: BuildQueue::new(),
             build_history: BuildHistory::load(),
@@ -102,6 +104,8 @@ impl App {
             shlib_map,
             gcc_info,
             shlib_updates: Vec::new(),
+            build_log_scroll: 0,
+            pkg_last_checked: version_check::last_check_time(),
         })
     }
 
@@ -286,6 +290,7 @@ impl App {
                 version_check::VersionMsg::Done(count) => {
                     self.checking_versions = false;
                     self.version_check_rx = None;
+                    self.pkg_last_checked = version_check::last_check_time();
                     self.status_msg = Some(format!("Checked {} packages", count));
                     return;
                 }
@@ -314,6 +319,7 @@ impl App {
                         }
                     }
                     self.build_queue.current_output.clear();
+                    self.build_log_scroll = 0;
                     self.status_msg = Some(format!("Building {}...", name));
                 }
                 BuildMsg::Output(_name, line) => {
@@ -749,6 +755,15 @@ impl App {
                 }
             }
         }
+    }
+
+    pub fn scroll_log_up(&mut self) {
+        let max = self.build_queue.current_output.len().saturating_sub(1);
+        self.build_log_scroll = (self.build_log_scroll + 1).min(max);
+    }
+
+    pub fn scroll_log_down(&mut self) {
+        self.build_log_scroll = self.build_log_scroll.saturating_sub(1);
     }
 
     /// Get summary counts for status bar.

@@ -200,7 +200,7 @@ src/
 
 ### Keybinds (complete)
 
-`j/k` navigate, `/` search, `Enter` detail, `t` tree, `u` upstream, `U` bump+build, `r` refresh, `b` build, `B` build+deps, `R` rebuild all, `A` update all, `S` apply shlib updates, `g` git menu, `Esc` back/cancel, `q`/`Ctrl+C` quit
+`j/k` navigate (scrolls build log when BuildLog panel is open), `/` search, `Enter` detail, `t` tree, `u` upstream, `U` bump+build, `r` refresh, `b` build, `B` build+deps, `R` rebuild all, `A` update all, `S` apply shlib updates, `g` git menu, `Esc` back/cancel, `q`/`Ctrl+C` quit
 
 ---
 
@@ -229,4 +229,6 @@ src/
 - **.xbps filename parsing**: format is `name-ver_rev.arch.xbps`. Must strip `.arch.xbps` from the end (rfind), not find first dot (version contains dots). Also filter subpackages by checking character after `name-` prefix is a digit.
 - **Zed binary layout**: `bin/zed` (CLI launcher) looks for `../libexec/zed-editor` relative to itself. Template must preserve the `bin/` + `libexec/` sibling relationship — can't put both flat in the same dir.
 - **Zed distfiles**: the `zed.dev/api/releases/stable/latest/` URL is a redirect to the current release — checksum breaks on upstream updates. Pin to `github.com/zed-industries/zed/releases/download/v${version}/` instead.
+- **Zed desktop file renamed**: as of ~0.224, the desktop file changed from `share/applications/zed.desktop` to `share/applications/dev.zed.Zed.desktop`. Check tarball with `tar -tzf ... | grep desktop` when bump fails in do_install.
 - **Status priority when not installed**: if a built .xbps exists but package isn't installed, status should be BUILD READY (actionable) not NOT INSTALLED (implies nothing is built).
+- **Header staleness hints**: void fetch and pkg upstream check timestamps both shown in header. Hints (`g:sync`, `u:check`) appear only when >3 days stale — avoids noise on fresh installs. Pkg last-checked time derived from max timestamp across version cache entries (`~/.cache/vpm/versions.json`).

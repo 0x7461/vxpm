@@ -22,6 +22,18 @@ const SURFACE0: Color = Color::Rgb(54, 58, 79);
 const OVERLAY0: Color = Color::Rgb(110, 115, 141);
 const BASE: Color = Color::Rgb(36, 39, 58);
 
+fn elapsed_label(secs: u64) -> String {
+    if secs < 60 {
+        "just now".to_string()
+    } else if secs < 3600 {
+        format!("{}m ago", secs / 60)
+    } else if secs < 86400 {
+        format!("{}h ago", secs / 3600)
+    } else {
+        format!("{}d ago", secs / 86400)
+    }
+}
+
 fn status_color(status: &Status) -> Color {
     match status {
         Status::Ok => GREEN,
@@ -90,39 +102,61 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
     ];
 
     if let Some(ref gs) = app.git_status {
-        spans.push(Span::styled("  ", Style::default()));
-        spans.push(Span::styled(&gs.branch, Style::default().fg(OVERLAY0)));
-
+        // Branch + ahead/behind
+        spans.push(Span::styled("  on ", Style::default().fg(OVERLAY0)));
+        spans.push(Span::styled(gs.branch.clone(), Style::default().fg(TEXT)));
         if gs.ahead > 0 {
             spans.push(Span::styled(
-                format!(" | {} ahead", gs.ahead),
+                format!(" ({} ahead)", gs.ahead),
                 Style::default().fg(PEACH),
             ));
         }
         if gs.behind > 0 {
             spans.push(Span::styled(
-                format!(" | {} behind", gs.behind),
+                format!(" ({} behind)", gs.behind),
                 Style::default().fg(YELLOW),
             ));
         }
 
+        // Void fetch status
         if let Some(fetch_time) = gs.last_fetch {
             if let Ok(elapsed) = fetch_time.elapsed() {
                 let secs = elapsed.as_secs();
-                let label = if secs < 60 {
-                    "just now".to_string()
-                } else if secs < 3600 {
-                    format!("{}m ago", secs / 60)
-                } else if secs < 86400 {
-                    format!("{}h ago", secs / 3600)
-                } else {
-                    format!("{}d ago", secs / 86400)
-                };
+                let stale = secs > 3 * 86400;
+                let label = elapsed_label(secs);
+                let color = if stale { YELLOW } else { OVERLAY0 };
                 spans.push(Span::styled(
-                    format!(" | synced {}", label),
-                    Style::default().fg(OVERLAY0),
+                    format!("  |  void: {}", label),
+                    Style::default().fg(color),
                 ));
+                if stale {
+                    spans.push(Span::styled("  g:sync", Style::default().fg(YELLOW)));
+                }
             }
+        }
+    }
+
+    // Pkg upstream check status
+    {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let (label, stale) = match app.pkg_last_checked {
+            Some(ts) => {
+                let secs = now.saturating_sub(ts);
+                (elapsed_label(secs), secs > 3 * 86400)
+            }
+            None => ("never".to_string(), true),
+        };
+        let color = if stale { YELLOW } else { OVERLAY0 };
+        spans.push(Span::styled(
+            format!("  |  pkgs: {}", label),
+            Style::default().fg(color),
+        ));
+        if stale {
+            spans.push(Span::styled("  u:check", Style::default().fg(YELLOW)));
         }
     }
 
@@ -475,11 +509,12 @@ fn draw_build_log(f: &mut Frame, app: &App, area: Rect) {
     }
     lines.push(Line::from(queue_spans));
 
-    // Scrolling build output — show last N lines that fit
+    // Scrolling build output — show last N lines that fit, offset by scroll
     let available = area.height.saturating_sub(3) as usize; // borders + queue line
     let output = &app.build_queue.current_output;
-    let start = output.len().saturating_sub(available);
-    for line_text in &output[start..] {
+    let tail = output.len().saturating_sub(app.build_log_scroll);
+    let start = tail.saturating_sub(available);
+    for line_text in &output[start..tail] {
         let color = if line_text.starts_with("ERR:") { RED } else { TEXT };
         lines.push(Line::from(Span::styled(
             format!("  {}", line_text),
@@ -644,13 +679,16 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
         ));
     }
 
-    // Keybind help
-    spans.push(Span::styled("  ", Style::default()));
-    spans.push(Span::styled(
-        "j/k:nav  /:search  Enter:detail  t:tree  u:upstream  b:build  B:deps  R:all  A:update-all  g:git  q:quit",
-        Style::default().fg(OVERLAY0),
-    ));
+    const KEYBINDS: &str = "j/k:nav  /:search  Enter:detail  t:tree  u:upstream  U:bump  b:build  B:deps  R:all  A:update-all  g:git  q:quit";
 
-    let bar = Paragraph::new(Line::from(spans));
-    f.render_widget(bar, area);
+    let chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Min(0), Constraint::Length(KEYBINDS.len() as u16)])
+        .split(area);
+
+    let left = Paragraph::new(Line::from(spans));
+    f.render_widget(left, chunks[0]);
+
+    let right = Paragraph::new(Span::styled(KEYBINDS, Style::default().fg(OVERLAY0)));
+    f.render_widget(right, chunks[1]);
 }

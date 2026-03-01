@@ -167,6 +167,13 @@ fn check_xbps_src(void_pkgs: &Path, name: &str) -> Result<Option<String>> {
     Ok(None)
 }
 
+/// Returns the most recent timestamp across all cache entries (seconds since epoch).
+/// Used to show "pkgs checked N ago" in the header.
+pub fn last_check_time() -> Option<u64> {
+    let cache = load_cache();
+    cache.entries.values().map(|e| e.timestamp).max()
+}
+
 pub enum VersionMsg {
     Found(String, String), // (name, version)
     Done(usize),           // total count checked

@@ -80,8 +80,20 @@ fn run_tui(cfg: config::Config) -> Result<()> {
                     match key.code {
                         KeyCode::Char('q') => break,
                         KeyCode::Char('/') => app.start_filter(),
-                        KeyCode::Char('j') | KeyCode::Down => app.move_down(),
-                        KeyCode::Char('k') | KeyCode::Up => app.move_up(),
+                        KeyCode::Char('j') | KeyCode::Down => {
+                            if app.panel == app::PanelMode::BuildLog {
+                                app.scroll_log_down();
+                            } else {
+                                app.move_down();
+                            }
+                        }
+                        KeyCode::Char('k') | KeyCode::Up => {
+                            if app.panel == app::PanelMode::BuildLog {
+                                app.scroll_log_up();
+                            } else {
+                                app.move_up();
+                            }
+                        }
                         KeyCode::Enter => app.toggle_detail(),
                         KeyCode::Char('t') => app.toggle_tree(),
                         KeyCode::Char('u') => app.check_versions(),
