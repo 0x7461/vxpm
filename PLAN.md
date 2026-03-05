@@ -222,6 +222,13 @@ src/
 | 5h | Config file | Done |
 | 6 | Keybind rework + help panel | Done |
 
+## Future Ideas
+
+- **Uncommitted templates**: show packages in `srcpkgs/` that aren't committed yet — badge them `UNCOMMITTED` so they're visible without needing `git add` first.
+- **Custom void templates via vpm**: explore creating/managing new package templates from within the TUI (scaffold, edit, commit flow).
+- **GitHub Actions releases**: some packages publish via GH Actions artifacts rather than the standard releases API — explore detecting these for version checks.
+- **vpm void package**: create an xbps-src template for vpm itself so it installs like any other package (`xi vpm`).
+
 ---
 
 ## Technical Notes
