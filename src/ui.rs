@@ -36,11 +36,10 @@ fn elapsed_label(secs: u64) -> String {
 
 fn status_color(status: &Status) -> Color {
     match status {
-        Status::Ok => GREEN,
-        Status::NotInstalled => YELLOW,
-        Status::NeedsBuild => YELLOW,
-        Status::BuildReady => PEACH,
-        Status::UpdateAvailable => PEACH,
+        Status::UpToDate => GREEN,
+        Status::UpstreamAhead => PEACH,
+        Status::BuildOutdated => YELLOW,
+        Status::ReadyToInstall => TEAL,
         Status::BuildFailed => RED,
     }
 }
@@ -239,7 +238,7 @@ fn draw_package_list(
             }
 
             let status_fg = if !ps.soname_mismatches.is_empty() || gcc_info.is_blocked(&ps.package.name) {
-                if ps.status == Status::Ok { PEACH } else { status_color(&ps.status) }
+                if ps.status == Status::UpToDate { PEACH } else { status_color(&ps.status) }
             } else {
                 status_color(&ps.status)
             };
@@ -363,7 +362,7 @@ fn draw_detail(f: &mut Frame, app: &App, area: Rect) {
     };
 
     let pkg = &selected.package;
-    let desc = selected.description();
+    let template_ver = format!("{}_{}", pkg.version, pkg.revision);
 
     let rev_deps = app
         .dep_graph
@@ -372,10 +371,7 @@ fn draw_detail(f: &mut Frame, app: &App, area: Rect) {
         .map(|d| {
             let mut v: Vec<&String> = d.iter().collect();
             v.sort();
-            v.iter()
-                .map(|s| s.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
+            v.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
         })
         .unwrap_or_default();
 
@@ -386,25 +382,64 @@ fn draw_detail(f: &mut Frame, app: &App, area: Rect) {
         .map(|d| {
             let mut v: Vec<&String> = d.iter().collect();
             v.sort();
-            v.iter()
-                .map(|s| s.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
+            v.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
         })
         .unwrap_or_default();
+
+    // Version pipeline: upstream → template → build → system
+    let upstream_ver = selected.latest.as_deref().unwrap_or("?");
+    let build_ver = selected.built.as_deref().unwrap_or("—");
+    let system_ver = selected.installed.as_ref()
+        .map(|v| v.rfind('-').map(|i| v[i+1..].to_string()).unwrap_or_else(|| v.clone()))
+        .unwrap_or_else(|| "—".to_string());
+
+    let upstream_color = match selected.latest.as_deref() {
+        None => OVERLAY0,
+        Some(v) if crate::package::version_newer_pub(v, &pkg.version) => PEACH,
+        _ => GREEN,
+    };
+    let build_color = if selected.built.as_deref().map(|b| b == template_ver).unwrap_or(false) {
+        GREEN
+    } else if selected.built.is_none() {
+        OVERLAY0
+    } else {
+        YELLOW
+    };
+    let system_color = match &selected.installed {
+        None => OVERLAY0,
+        Some(_) => match &selected.built {
+            Some(b) if system_ver == *b => GREEN,
+            _ => YELLOW,
+        },
+    };
 
     let mut lines = vec![
         Line::from(vec![
             Span::styled("  ", Style::default()),
-            Span::styled(&pkg.short_desc, Style::default().fg(TEXT)),
+            Span::styled(pkg.short_desc.clone(), Style::default().fg(TEXT)),
         ]),
         Line::from(vec![
-            Span::styled("  Homepage: ", Style::default().fg(OVERLAY0)),
-            Span::styled(&pkg.homepage, Style::default().fg(TEAL)),
+            Span::styled("  Homepage:  ", Style::default().fg(OVERLAY0)),
+            Span::styled(pkg.homepage.clone(), Style::default().fg(TEAL)),
         ]),
         Line::from(vec![
-            Span::styled("  Status: ", Style::default().fg(OVERLAY0)),
-            Span::styled(desc, Style::default().fg(status_color(&selected.status))),
+            Span::styled("  Status:    ", Style::default().fg(OVERLAY0)),
+            Span::styled(
+                selected.status.label(),
+                Style::default().fg(status_color(&selected.status)).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("  — ", Style::default().fg(OVERLAY0)),
+            Span::styled(selected.action_hint(), Style::default().fg(OVERLAY0)),
+        ]),
+        Line::from(vec![
+            Span::styled("  upstream:  ", Style::default().fg(OVERLAY0)),
+            Span::styled(upstream_ver.to_string(), Style::default().fg(upstream_color)),
+            Span::styled("  template:  ", Style::default().fg(OVERLAY0)),
+            Span::styled(template_ver.clone(), Style::default().fg(TEXT)),
+            Span::styled("  build:  ", Style::default().fg(OVERLAY0)),
+            Span::styled(build_ver.to_string(), Style::default().fg(build_color)),
+            Span::styled("  system:  ", Style::default().fg(OVERLAY0)),
+            Span::styled(system_ver.clone(), Style::default().fg(system_color)),
         ]),
         Line::from(vec![
             Span::styled("  Depends on: ", Style::default().fg(OVERLAY0)),
@@ -634,24 +669,20 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
         Span::styled(" ", Style::default()),
     ];
 
-    if counts.ok > 0 {
-        spans.push(Span::styled(format!("{} ok", counts.ok), Style::default().fg(GREEN)));
+    if counts.up_to_date > 0 {
+        spans.push(Span::styled(format!("{} up to date", counts.up_to_date), Style::default().fg(GREEN)));
         spans.push(Span::styled(" │ ", Style::default().fg(OVERLAY0)));
     }
-    if counts.update_avail > 0 {
-        spans.push(Span::styled(format!("{} updates", counts.update_avail), Style::default().fg(PEACH)));
+    if counts.upstream_ahead > 0 {
+        spans.push(Span::styled(format!("{} upstream ahead", counts.upstream_ahead), Style::default().fg(PEACH)));
         spans.push(Span::styled(" │ ", Style::default().fg(OVERLAY0)));
     }
-    if counts.needs_build > 0 {
-        spans.push(Span::styled(format!("{} need build", counts.needs_build), Style::default().fg(YELLOW)));
+    if counts.build_outdated > 0 {
+        spans.push(Span::styled(format!("{} build outdated", counts.build_outdated), Style::default().fg(YELLOW)));
         spans.push(Span::styled(" │ ", Style::default().fg(OVERLAY0)));
     }
-    if counts.build_ready > 0 {
-        spans.push(Span::styled(format!("{} ready", counts.build_ready), Style::default().fg(PEACH)));
-        spans.push(Span::styled(" │ ", Style::default().fg(OVERLAY0)));
-    }
-    if counts.not_installed > 0 {
-        spans.push(Span::styled(format!("{} not installed", counts.not_installed), Style::default().fg(YELLOW)));
+    if counts.ready_to_install > 0 {
+        spans.push(Span::styled(format!("{} ready to install", counts.ready_to_install), Style::default().fg(TEAL)));
         spans.push(Span::styled(" │ ", Style::default().fg(OVERLAY0)));
     }
     if counts.build_failed > 0 {
@@ -679,7 +710,7 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
         ));
     }
 
-    const KEYBINDS: &str = "j/k:nav  /:search  Enter:detail  t:tree  u:upstream  U:bump  b:build  B:deps  R:all  A:update-all  g:git  q:quit";
+    const KEYBINDS: &str = "j/k:nav  /:search  Enter:detail  t:tree  g:git  ?:help  q:quit";
 
     let chunks = Layout::default()
         .direction(Direction::Horizontal)

@@ -38,22 +38,20 @@ pub struct PackageState {
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub enum Status {
-    Ok,
-    NotInstalled,
-    BuildReady,
-    NeedsBuild,
-    UpdateAvailable,
+    UpToDate,
+    UpstreamAhead,
+    BuildOutdated,
+    ReadyToInstall,
     BuildFailed,
 }
 
 impl Status {
     pub fn label(&self) -> &'static str {
         match self {
-            Status::Ok => "OK",
-            Status::NotInstalled => "NOT INSTALLED",
-            Status::BuildReady => "BUILD READY",
-            Status::NeedsBuild => "NEEDS BUILD",
-            Status::UpdateAvailable => "UPDATE AVAIL",
+            Status::UpToDate => "UP TO DATE",
+            Status::UpstreamAhead => "UPSTREAM AHEAD",
+            Status::BuildOutdated => "BUILD OUTDATED",
+            Status::ReadyToInstall => "READY TO INSTALL",
             Status::BuildFailed => "BUILD FAILED",
         }
     }
@@ -62,11 +60,10 @@ impl Status {
     pub fn priority(&self) -> u8 {
         match self {
             Status::BuildFailed => 0,
-            Status::NotInstalled => 1,
-            Status::UpdateAvailable => 2,
-            Status::NeedsBuild => 3,
-            Status::BuildReady => 4,
-            Status::Ok => 5,
+            Status::UpstreamAhead => 1,
+            Status::BuildOutdated => 2,
+            Status::ReadyToInstall => 3,
+            Status::UpToDate => 4,
         }
     }
 }
@@ -80,88 +77,61 @@ impl PackageState {
     ) -> Status {
         let template_ver = format!("{}_{}",  package.version, package.revision);
 
-        // Not installed at all
-        if installed.is_none() {
-            // If a built .xbps exists, it's ready to install
-            if built.is_some() {
-                return Status::BuildReady;
+        // Upstream gap: upstream > template (highest priority — act on this first)
+        if let Some(latest_ver) = latest {
+            if version_newer(latest_ver, &package.version) {
+                return Status::UpstreamAhead;
             }
-            return Status::NotInstalled;
+        }
+
+        // Template → build gap: nothing built yet
+        if built.is_none() && installed.is_none() {
+            return Status::BuildOutdated;
+        }
+
+        // Build → system gap: built but never installed
+        if installed.is_none() {
+            return Status::ReadyToInstall;
         }
 
         let inst_ver = installed.as_ref().unwrap();
 
-        // Check if upstream has a newer version than the template
-        if let Some(latest_ver) = latest {
-            if version_newer(latest_ver, &package.version) {
-                return Status::UpdateAvailable;
-            }
-        }
-
-        // Template is newer than what's built
         if let Some(built_ver) = built {
+            // Template → build gap: built version is stale
             if *built_ver != template_ver {
-                return Status::NeedsBuild;
+                return Status::BuildOutdated;
             }
-            // Built version exists and is newer than installed
+            // Build → system gap: newer build waiting to be installed
             let inst_short = installed_to_ver_rev(inst_ver);
             if *built_ver != inst_short {
-                return Status::BuildReady;
+                return Status::ReadyToInstall;
             }
         } else {
-            // No built .xbps at all — check if template matches installed
+            // No .xbps but package is installed — template may have moved ahead
             let inst_short = installed_to_ver_rev(inst_ver);
             if inst_short != template_ver {
-                return Status::NeedsBuild;
+                return Status::BuildOutdated;
             }
         }
 
-        Status::Ok
+        Status::UpToDate
     }
 
-    pub fn description(&self) -> String {
-        let p = &self.package;
-        let template_ver = format!("{}_{}", p.version, p.revision);
+    /// One-line action hint shown in the detail panel.
+    pub fn action_hint(&self) -> &'static str {
         match &self.status {
-            Status::NotInstalled => {
-                "Template exists but package is not installed on the system.".to_string()
-            }
-            Status::UpdateAvailable => {
-                let latest = self.latest.as_deref().unwrap_or("?");
-                format!(
-                    "Upstream has released v{}, but template defines v{}. Update the template to build the new version.",
-                    latest, p.version
-                )
-            }
-            Status::NeedsBuild => {
-                format!(
-                    "Template defines v{} but no matching .xbps has been built. Run `xbps-src pkg {}` to build.",
-                    template_ver, p.name
-                )
-            }
-            Status::BuildReady => {
-                let built = self.built.as_deref().unwrap_or("?");
-                let inst = self.installed.as_deref().unwrap_or("?");
-                format!(
-                    "v{} is built and ready to install. Installed: {}. Run `xi {}` to update.",
-                    built, inst, p.name
-                )
-            }
-            Status::Ok => {
-                let inst = self.installed.as_deref().unwrap_or("?");
-                format!(
-                    "Installed {} matches the template. No upstream updates detected.",
-                    inst
-                )
-            }
-            Status::BuildFailed => {
-                format!(
-                    "Build of {} failed. Check the build log for details.",
-                    p.name
-                )
-            }
+            Status::UpToDate => "Nothing to do.",
+            Status::UpstreamAhead => "Press t to bump the template to the upstream version.",
+            Status::BuildOutdated => "Press b to build the package.",
+            Status::ReadyToInstall => "Run xi <pkg> to install the built package.",
+            Status::BuildFailed => "Check the build log. Press b to retry.",
         }
     }
+}
+
+/// Public wrapper for version comparison (used by ui.rs for color coding).
+pub fn version_newer_pub(a: &str, b: &str) -> bool {
+    version_newer(a, b)
 }
 
 /// Compare two version strings. Returns true if `a` is newer than `b`.

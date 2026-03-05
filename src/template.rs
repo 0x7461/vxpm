@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
+#[allow(dead_code)]
 pub struct BumpResult {
     pub old_version: String,
     pub new_version: String,

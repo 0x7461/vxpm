@@ -216,6 +216,7 @@ impl App {
                 if failed.contains(&state.package.name) {
                     state.status = Status::BuildFailed;
                 }
+
             }
 
             // Re-parse shlibs and check mismatches
@@ -238,20 +239,11 @@ impl App {
     }
 
     pub fn check_versions(&mut self) {
-        self.start_version_check(false);
-    }
-
-    pub fn force_check_versions(&mut self) {
-        self.start_version_check(true);
-    }
-
-    fn start_version_check(&mut self, force: bool) {
         if self.checking_versions {
             return;
         }
         self.checking_versions = true;
-        let label = if force { "Force-checking" } else { "Checking" };
-        self.status_msg = Some(format!("{} upstream versions...", label));
+        self.status_msg = Some("Checking upstream versions...".to_string());
 
         let pkgs: Vec<Package> = self.packages.iter().map(|s| s.package.clone()).collect();
         let void_pkgs = self.void_pkgs.clone();
@@ -259,7 +251,7 @@ impl App {
         self.version_check_rx = Some(rx);
 
         std::thread::spawn(move || {
-            version_check::check_all_versions_streaming(&void_pkgs, &pkgs, force, tx);
+            version_check::check_all_versions_streaming(&void_pkgs, &pkgs, false, tx);
         });
     }
 
@@ -477,22 +469,16 @@ impl App {
     }
 
     /// Bump template version and queue a build (for UPDATE AVAIL packages).
+    /// For packages already at the right version (NeedsBuild, BuildFailed, etc), just builds.
     pub fn bump_and_build(&mut self) {
         if self.build_queue.active {
             self.status_msg = Some("Build already in progress".to_string());
             return;
         }
 
-        let (name, latest) = match self.selected_package() {
-            Some(p) if p.status == Status::UpdateAvailable => {
-                let latest = p.latest.clone().unwrap_or_default();
-                (p.package.name.clone(), latest)
-            }
-            _ => {
-                // Not UPDATE AVAIL — fall through to force_check_versions
-                self.force_check_versions();
-                return;
-            }
+        let (name, status, latest) = match self.selected_package() {
+            Some(p) => (p.package.name.clone(), p.status.clone(), p.latest.clone().unwrap_or_default()),
+            None => return,
         };
 
         if self.gcc_info.is_blocked(&name) {
@@ -504,31 +490,34 @@ impl App {
             return;
         }
 
-        self.status_msg = Some(format!("Bumping {} to v{}...", name, latest));
+        match status {
+            Status::UpstreamAhead => {
+                self.status_msg = Some(format!("Bumping {} to v{}...", name, latest));
 
-        match template::bump_template(&self.void_pkgs, &name, &latest) {
-            Ok(result) => {
-                self.status_msg = Some(format!(
-                    "Bumped {} {} -> {} (checksum: {}...)",
-                    name,
-                    result.old_version,
-                    result.new_version,
-                    &result.new_checksum[..12]
-                ));
-
-                // Refresh to pick up the new template version
-                self.refresh();
-
-                // Now queue the build
-                self.build_queue.jobs = vec![BuildJob {
-                    name,
-                    status: BuildJobStatus::Pending,
-                }];
+                match template::bump_template(&self.void_pkgs, &name, &latest) {
+                    Ok(result) => {
+                        self.status_msg = Some(format!(
+                            "Bumped {} {} -> {} — building...",
+                            name, result.old_version, result.new_version,
+                        ));
+                        self.refresh();
+                        self.build_queue.jobs = vec![BuildJob { name, status: BuildJobStatus::Pending }];
+                        self.build_queue.start(self.void_pkgs.clone());
+                        self.panel = PanelMode::BuildLog;
+                    }
+                    Err(e) => {
+                        self.status_msg = Some(format!("Bump failed: {}", e));
+                    }
+                }
+            }
+            Status::BuildOutdated | Status::BuildFailed => {
+                // Template already at right version, just build
+                self.build_queue.jobs = vec![BuildJob { name, status: BuildJobStatus::Pending }];
                 self.build_queue.start(self.void_pkgs.clone());
                 self.panel = PanelMode::BuildLog;
             }
-            Err(e) => {
-                self.status_msg = Some(format!("Bump failed: {}", e));
+            Status::UpToDate | Status::ReadyToInstall => {
+                self.status_msg = Some(format!("{} — nothing to build", name));
             }
         }
     }
@@ -583,7 +572,7 @@ impl App {
         let updatable: Vec<(String, String)> = self
             .packages
             .iter()
-            .filter(|p| p.status == Status::UpdateAvailable)
+            .filter(|p| p.status == Status::UpstreamAhead)
             .filter_map(|p| {
                 p.latest
                     .as_ref()
@@ -771,11 +760,10 @@ impl App {
         let mut counts = StatusCounts::default();
         for p in &self.packages {
             match p.status {
-                Status::Ok => counts.ok += 1,
-                Status::NotInstalled => counts.not_installed += 1,
-                Status::BuildReady => counts.build_ready += 1,
-                Status::NeedsBuild => counts.needs_build += 1,
-                Status::UpdateAvailable => counts.update_avail += 1,
+                Status::UpToDate => counts.up_to_date += 1,
+                Status::UpstreamAhead => counts.upstream_ahead += 1,
+                Status::BuildOutdated => counts.build_outdated += 1,
+                Status::ReadyToInstall => counts.ready_to_install += 1,
                 Status::BuildFailed => counts.build_failed += 1,
             }
         }
@@ -785,10 +773,9 @@ impl App {
 
 #[derive(Default)]
 pub struct StatusCounts {
-    pub ok: usize,
-    pub not_installed: usize,
-    pub build_ready: usize,
-    pub needs_build: usize,
-    pub update_avail: usize,
+    pub up_to_date: usize,
+    pub upstream_ahead: usize,
+    pub build_outdated: usize,
+    pub ready_to_install: usize,
     pub build_failed: usize,
 }
