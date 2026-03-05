@@ -56,6 +56,7 @@ fn run_tui(cfg: config::Config) -> Result<()> {
     loop {
         app.poll_build();
         app.poll_version_check();
+        app.poll_template_bump();
         app.poll_git();
 
         terminal.draw(|f| ui::draw(f, &mut app))?;
@@ -95,18 +96,29 @@ fn run_tui(cfg: config::Config) -> Result<()> {
                             }
                         }
                         KeyCode::Enter => app.toggle_detail(),
-                        KeyCode::Char('t') => app.toggle_tree(),
-                        KeyCode::Char('u') => app.check_versions(),
-                        KeyCode::Char('U') => app.bump_and_build(),
-                        KeyCode::Char('r') => app.refresh(),
+                        KeyCode::Tab => app.toggle_tree(),
+                        // Upstream check: u = selected, U = all
+                        KeyCode::Char('u') => app.check_version_selected(),
+                        KeyCode::Char('U') => app.check_versions(),
+                        // Template bump (no build): t = selected, T = all
+                        KeyCode::Char('t') => app.bump_template_selected(),
+                        KeyCode::Char('T') => app.bump_template_all(),
+                        // Build (best-effort): b = selected, B = all buildable
                         KeyCode::Char('b') => app.build_selected(),
-                        KeyCode::Char('B') => app.build_with_dependents(),
-                        KeyCode::Char('R') => app.rebuild_all(),
-                        KeyCode::Char('A') => app.update_all(),
+                        KeyCode::Char('B') => app.build_all_buildable(),
+                        // Other
+                        KeyCode::Char('r') => app.refresh(),
                         KeyCode::Char('S') if !app.shlib_updates.is_empty() => {
                             app.apply_shlib_updates();
                         }
                         KeyCode::Char('g') => app.open_git_menu(),
+                        KeyCode::Char('?') => {
+                            app.panel = if app.panel == app::PanelMode::Help {
+                                app::PanelMode::None
+                            } else {
+                                app::PanelMode::Help
+                            };
+                        }
                         KeyCode::Char('1') if app.panel == app::PanelMode::GitMenu && !app.git_op_active => {
                             app.git_sync_master();
                         }

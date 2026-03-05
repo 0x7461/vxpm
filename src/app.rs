@@ -15,6 +15,12 @@ use crate::shlibs::{self, ShlibMap};
 use crate::template;
 use crate::version_check;
 
+pub enum TemplateBumpMsg {
+    Done(String, String, String), // (pkgname, old_version, new_version)
+    Failed(String, String),       // (pkgname, error_msg)
+    AllDone,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum View {
     List,
@@ -27,6 +33,7 @@ pub enum PanelMode {
     Detail,
     BuildLog,
     GitMenu,
+    Help,
 }
 
 pub struct App {
@@ -55,6 +62,8 @@ pub struct App {
     pub shlib_updates: Vec<(String, String, String, String)>, // (pkg, old_so, new_so, new_pkgver)
     pub build_log_scroll: usize, // lines offset from bottom; 0 = follow tail
     pub pkg_last_checked: Option<u64>, // unix timestamp of last pkg upstream check
+    pub template_bump_rx: Option<Receiver<TemplateBumpMsg>>,
+    pub template_bumping: bool,
 }
 
 impl App {
@@ -106,6 +115,8 @@ impl App {
             shlib_updates: Vec::new(),
             build_log_scroll: 0,
             pkg_last_checked: version_check::last_check_time(),
+            template_bump_rx: None,
+            template_bumping: false,
         })
     }
 
@@ -238,6 +249,27 @@ impl App {
         }
     }
 
+    /// Check upstream version for the selected package only.
+    pub fn check_version_selected(&mut self) {
+        if self.checking_versions {
+            self.status_msg = Some("Version check already in progress".to_string());
+            return;
+        }
+        let pkg = match self.selected_package() {
+            Some(p) => p.package.clone(),
+            None => return,
+        };
+        self.checking_versions = true;
+        self.status_msg = Some(format!("Checking upstream for {}...", pkg.name));
+        let void_pkgs = self.void_pkgs.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.version_check_rx = Some(rx);
+        std::thread::spawn(move || {
+            version_check::check_all_versions_streaming(&void_pkgs, &[pkg], false, tx);
+        });
+    }
+
+    /// Check upstream versions for all packages.
     pub fn check_versions(&mut self) {
         if self.checking_versions {
             return;
@@ -290,7 +322,111 @@ impl App {
         }
     }
 
-    /// Poll the build queue for messages from the background thread.
+    /// Poll for template bump results. Call each tick.
+    pub fn poll_template_bump(&mut self) {
+        let msgs: Vec<TemplateBumpMsg> = if let Some(ref rx) = self.template_bump_rx {
+            rx.try_iter().collect()
+        } else {
+            return;
+        };
+
+        for msg in msgs {
+            match msg {
+                TemplateBumpMsg::Done(name, old, new) => {
+                    self.status_msg = Some(format!("Bumped {} {} → {}", name, old, new));
+                }
+                TemplateBumpMsg::Failed(name, err) => {
+                    self.status_msg = Some(format!("Bump failed for {}: {}", name, err));
+                }
+                TemplateBumpMsg::AllDone => {
+                    self.template_bumping = false;
+                    self.template_bump_rx = None;
+                    self.refresh();
+                    return;
+                }
+            }
+        }
+    }
+
+    /// Bump template for the selected package (UpstreamAhead only). Does not build.
+    pub fn bump_template_selected(&mut self) {
+        if self.template_bumping {
+            self.status_msg = Some("Template bump already in progress".to_string());
+            return;
+        }
+        let (name, latest) = match self.selected_package() {
+            Some(p) if p.status == Status::UpstreamAhead => match p.latest.clone() {
+                Some(v) => (p.package.name.clone(), v),
+                None => {
+                    self.status_msg = Some("No upstream version known — run u first".to_string());
+                    return;
+                }
+            },
+            Some(p) => {
+                self.status_msg = Some(format!("{} — not upstream ahead", p.package.name));
+                return;
+            }
+            None => return,
+        };
+        self.template_bumping = true;
+        self.status_msg = Some(format!("Bumping {} to v{}...", name, latest));
+        let void_pkgs = self.void_pkgs.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.template_bump_rx = Some(rx);
+        std::thread::spawn(move || {
+            match template::bump_template(&void_pkgs, &name, &latest) {
+                Ok(result) => {
+                    let _ = tx.send(TemplateBumpMsg::Done(name, result.old_version, result.new_version));
+                }
+                Err(e) => {
+                    let _ = tx.send(TemplateBumpMsg::Failed(name, e.to_string()));
+                }
+            }
+            let _ = tx.send(TemplateBumpMsg::AllDone);
+        });
+    }
+
+    /// Bump templates for all UpstreamAhead packages. Does not build.
+    pub fn bump_template_all(&mut self) {
+        if self.template_bumping {
+            self.status_msg = Some("Template bump already in progress".to_string());
+            return;
+        }
+        let targets: Vec<(String, String)> = self
+            .packages
+            .iter()
+            .filter(|p| p.status == Status::UpstreamAhead)
+            .filter_map(|p| p.latest.as_ref().map(|v| (p.package.name.clone(), v.clone())))
+            .collect();
+        if targets.is_empty() {
+            self.status_msg = Some("No packages with upstream updates".to_string());
+            return;
+        }
+        self.template_bumping = true;
+        self.status_msg = Some(format!("Bumping {} packages...", targets.len()));
+        let void_pkgs = self.void_pkgs.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.template_bump_rx = Some(rx);
+        std::thread::spawn(move || {
+            for (name, latest) in targets {
+                match template::bump_template(&void_pkgs, &name, &latest) {
+                    Ok(result) => {
+                        let _ = tx.send(TemplateBumpMsg::Done(
+                            name,
+                            result.old_version,
+                            result.new_version,
+                        ));
+                    }
+                    Err(e) => {
+                        let _ = tx.send(TemplateBumpMsg::Failed(name, e.to_string()));
+                    }
+                }
+            }
+            let _ = tx.send(TemplateBumpMsg::AllDone);
+        });
+    }
+
+    /// Build the poll queue for messages from the background thread.
     pub fn poll_build(&mut self) {
         if !self.build_queue.active {
             return;
@@ -397,17 +533,33 @@ impl App {
         }
     }
 
-    /// Build the currently selected package.
+    /// Build the currently selected package (best-effort: skip if not buildable).
     pub fn build_selected(&mut self) {
         if self.build_queue.active {
             self.status_msg = Some("Build already in progress".to_string());
             return;
         }
 
-        let name = match self.selected_package() {
-            Some(p) => p.package.name.clone(),
+        let (name, status) = match self.selected_package() {
+            Some(p) => (p.package.name.clone(), p.status.clone()),
             None => return,
         };
+
+        match status {
+            Status::BuildOutdated | Status::BuildFailed => {}
+            Status::UpstreamAhead => {
+                self.status_msg = Some(format!("{} — upstream ahead, bump template first (t)", name));
+                return;
+            }
+            Status::ReadyToInstall => {
+                self.status_msg = Some(format!("{} — already built, run: xi {}", name, name));
+                return;
+            }
+            Status::UpToDate => {
+                self.status_msg = Some(format!("{} — nothing to build", name));
+                return;
+            }
+        }
 
         if self.gcc_info.is_blocked(&name) {
             let req = self.gcc_info.required_version(&name).unwrap_or_default();
@@ -426,6 +578,7 @@ impl App {
         self.panel = PanelMode::BuildLog;
     }
 
+    #[allow(dead_code)]
     /// Build the selected package plus all reverse dependents in topological order.
     pub fn build_with_dependents(&mut self) {
         if self.build_queue.active {
@@ -468,6 +621,57 @@ impl App {
         self.panel = PanelMode::BuildLog;
     }
 
+    /// Build all packages with BuildOutdated or BuildFailed status in topo order.
+    pub fn build_all_buildable(&mut self) {
+        if self.build_queue.active {
+            self.status_msg = Some("Build already in progress".to_string());
+            return;
+        }
+
+        let buildable: std::collections::HashSet<String> = self
+            .packages
+            .iter()
+            .filter(|p| matches!(p.status, Status::BuildOutdated | Status::BuildFailed))
+            .filter(|p| !self.gcc_info.is_blocked(&p.package.name))
+            .map(|p| p.package.name.clone())
+            .collect();
+
+        let blocked_count = self
+            .packages
+            .iter()
+            .filter(|p| matches!(p.status, Status::BuildOutdated | Status::BuildFailed))
+            .filter(|p| self.gcc_info.is_blocked(&p.package.name))
+            .count();
+
+        if buildable.is_empty() {
+            let hint = if blocked_count > 0 {
+                format!("No buildable packages ({} GCC-blocked)", blocked_count)
+            } else {
+                "No packages to build (try 't' to bump templates)".to_string()
+            };
+            self.status_msg = Some(hint);
+            return;
+        }
+
+        let topo = self.dep_graph.topological_sort();
+        let ordered: Vec<String> = topo.into_iter().filter(|n| buildable.contains(n)).collect();
+
+        let msg = if blocked_count > 0 {
+            format!("Building {} packages ({} GCC-blocked, skipped)...", ordered.len(), blocked_count)
+        } else {
+            format!("Building {} packages...", ordered.len())
+        };
+        self.status_msg = Some(msg);
+
+        self.build_queue.jobs = ordered
+            .into_iter()
+            .map(|n| BuildJob { name: n, status: BuildJobStatus::Pending })
+            .collect();
+        self.build_queue.start(self.void_pkgs.clone());
+        self.panel = PanelMode::BuildLog;
+    }
+
+    #[allow(dead_code)]
     /// Bump template version and queue a build (for UPDATE AVAIL packages).
     /// For packages already at the right version (NeedsBuild, BuildFailed, etc), just builds.
     pub fn bump_and_build(&mut self) {
@@ -522,6 +726,7 @@ impl App {
         }
     }
 
+    #[allow(dead_code)]
     /// Rebuild all custom packages in topological order.
     pub fn rebuild_all(&mut self) {
         if self.build_queue.active {
@@ -562,6 +767,7 @@ impl App {
         self.panel = PanelMode::BuildLog;
     }
 
+    #[allow(dead_code)]
     /// Bump all UPDATE AVAIL packages and queue builds.
     pub fn update_all(&mut self) {
         if self.build_queue.active {

@@ -50,6 +50,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         PanelMode::Detail => 10,
         PanelMode::BuildLog => 12,
         PanelMode::GitMenu => 10,
+        PanelMode::Help => 14,
     };
 
     let chunks = if panel_height > 0 {
@@ -86,6 +87,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             PanelMode::Detail => draw_detail(f, app, chunks[2]),
             PanelMode::BuildLog => draw_build_log(f, app, chunks[2]),
             PanelMode::GitMenu => draw_git_panel(f, app, chunks[2]),
+            PanelMode::Help => draw_help_panel(f, chunks[2]),
             PanelMode::None => {}
         }
         draw_status_bar(f, app, chunks[3]);
@@ -155,7 +157,7 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
             Style::default().fg(color),
         ));
         if stale {
-            spans.push(Span::styled("  u:check", Style::default().fg(YELLOW)));
+            spans.push(Span::styled("  U:check", Style::default().fg(YELLOW)));
         }
     }
 
@@ -662,6 +664,48 @@ fn draw_git_panel(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(para, area);
 }
 
+fn draw_help_panel(f: &mut Frame, area: Rect) {
+    let kb = |key: &'static str, desc: &'static str| -> Line<'static> {
+        Line::from(vec![
+            Span::styled(format!("  {:6}", key), Style::default().fg(TEAL).add_modifier(Modifier::BOLD)),
+            Span::styled(desc, Style::default().fg(TEXT)),
+        ])
+    };
+    let sep = || -> Line<'static> { Line::from("") };
+
+    let lines = vec![
+        kb("j/k", "Move up/down in list"),
+        kb("/", "Search/filter packages"),
+        kb("Tab", "Toggle dependency tree view"),
+        kb("Enter", "Toggle detail panel"),
+        sep(),
+        kb("u", "Check upstream version (selected)"),
+        kb("U", "Check upstream version (all)"),
+        kb("t", "Bump template to upstream (selected)"),
+        kb("T", "Bump template to upstream (all)"),
+        kb("b", "Build selected package"),
+        kb("B", "Build all buildable packages"),
+        sep(),
+        kb("g", "Git operations panel  (1: sync  2: rebase  3: push)"),
+        kb("S", "Apply pending shlib updates"),
+        kb("r", "Refresh package state"),
+        kb("Esc", "Close panel / cancel build (press twice)"),
+        kb("?", "Toggle this help panel"),
+        kb("q", "Quit"),
+    ];
+
+    let para = Paragraph::new(lines).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(SURFACE0))
+            .title(Span::styled(
+                " Keybinds ",
+                Style::default().fg(TEAL).add_modifier(Modifier::BOLD),
+            )),
+    );
+    f.render_widget(para, area);
+}
+
 fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
     let counts = app.status_counts();
 
@@ -710,7 +754,7 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
         ));
     }
 
-    const KEYBINDS: &str = "j/k:nav  /:search  Enter:detail  t:tree  g:git  ?:help  q:quit";
+    const KEYBINDS: &str = "j/k:nav  /:search  Tab:tree  u/U:check  t/T:bump  b/B:build  g:git  ?:help  q:quit";
 
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
