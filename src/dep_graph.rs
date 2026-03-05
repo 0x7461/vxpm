@@ -82,36 +82,7 @@ impl DepGraph {
         result
     }
 
-    /// Get the set of packages that need rebuilding if `changed` packages are updated.
-    /// BFS through reverse dependencies.
-    pub fn rebuild_set(&self, changed: &[String]) -> Vec<String> {
-        let mut visited: HashSet<String> = HashSet::new();
-        let mut queue: VecDeque<String> = VecDeque::new();
-
-        for name in changed {
-            queue.push_back(name.clone());
-            visited.insert(name.clone());
-        }
-
-        while let Some(name) = queue.pop_front() {
-            if let Some(dependents) = self.reverse.get(&name) {
-                for dep in dependents {
-                    if visited.insert(dep.clone()) {
-                        queue.push_back(dep.clone());
-                    }
-                }
-            }
-        }
-
-        // Return in topological order, excluding the original changed packages
-        let topo = self.topological_sort();
-        let changed_set: HashSet<String> = changed.iter().cloned().collect();
-        topo.into_iter()
-            .filter(|n| visited.contains(n) && !changed_set.contains(n))
-            .collect()
-    }
-
-    /// Get tree of reverse dependencies for a package (for tree view).
+/// Get tree of reverse dependencies for a package (for tree view).
     pub fn reverse_dep_tree(&self, name: &str) -> Vec<TreeNode> {
         self.build_tree(name, &mut HashSet::new())
     }
