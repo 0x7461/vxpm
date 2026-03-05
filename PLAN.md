@@ -198,9 +198,9 @@ src/
 - `~/.config/vpm/config.toml` — bootstrapped on first run
 - `void_packages` key with `~` expansion, replaces hardcoded path
 
-### Keybinds (complete)
+### Keybinds (complete, as of Phase 6)
 
-`j/k` navigate (scrolls build log when BuildLog panel is open), `/` search, `Enter` detail, `t` tree, `u` upstream, `U` bump+build, `r` refresh, `b` build, `B` build+deps, `R` rebuild all, `A` update all, `S` apply shlib updates, `g` git menu, `Esc` back/cancel, `q`/`Ctrl+C` quit
+`j/k` nav, `Tab` tree view, `/` search, `Enter` detail, `u` check upstream (selected), `U` check upstream (all), `t` bump template (selected, async), `T` bump template (all, async), `b` build selected (best-effort), `B` build all buildable (BuildOutdated+BuildFailed, topo), `S` apply shlib updates, `g` git menu, `?` help panel, `r` refresh, `Esc` back/cancel, `q`/`Ctrl+C` quit
 
 ---
 
@@ -220,6 +220,7 @@ src/
 | 5f | Install integration (xi keybind) | Skipped (needs sudo) |
 | 5g | Build log persistence | Done |
 | 5h | Config file | Done |
+| 6 | Keybind rework + help panel | Done |
 
 ---
 
@@ -232,4 +233,6 @@ src/
 - **Zed desktop file renamed**: as of ~0.224, the desktop file changed from `share/applications/zed.desktop` to `share/applications/dev.zed.Zed.desktop`. Check tarball with `tar -tzf ... | grep desktop` when bump fails in do_install.
 - **Ollama binary repack**: tarball (`ollama-linux-amd64.tar.zst`) has no top-level dir — use `create_wrksrc=yes`. CUDA runners (`lib/ollama/cuda_v12/`, `lib/ollama/cuda_v13/`) drag in `libcuda.so.1` which has no Void package — skip them in `do_install`, install CPU + Vulkan runners only. `vpm` only discovers committed templates — must `git add && git commit` before package appears in TUI.
 - **Status priority when not installed**: if a built .xbps exists but package isn't installed, status should be BUILD READY (actionable) not NOT INSTALLED (implies nothing is built).
-- **Header staleness hints**: void fetch and pkg upstream check timestamps both shown in header. Hints (`g:sync`, `u:check`) appear only when >3 days stale — avoids noise on fresh installs. Pkg last-checked time derived from max timestamp across version cache entries (`~/.cache/vpm/versions.json`).
+- **Header staleness hints**: dropped keybind hints from header (covered by `?` panel). Header shows void fetch age and pkg check info. Pkg check: `"N unchecked (last: YYYY-MM-DD HH:MM)"` or `"last YYYY-MM-DD HH:MM"` — uses exact local timestamp via chrono.
+- **pkg_last_checked TTL trap**: `last_check_time()` reads disk cache. If version check hits TTL (< 1h), no disk timestamps are updated → `last_check_time()` returns same old value → header appears unchanged. Fix: set `pkg_last_checked = SystemTime::now()` directly in `poll_version_check` Done handler, not from cache.
+- **last_check_time() = min not max**: represents the oldest checked package (staleness floor). But since we now set `pkg_last_checked` from wall clock on Done, `last_check_time()` is only used at startup to restore the previous session's value.
