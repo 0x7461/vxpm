@@ -1,3 +1,4 @@
+use chrono::{DateTime, Local};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -21,6 +22,12 @@ const TEXT: Color = Color::Rgb(202, 211, 245);
 const SURFACE0: Color = Color::Rgb(54, 58, 79);
 const OVERLAY0: Color = Color::Rgb(110, 115, 141);
 const BASE: Color = Color::Rgb(36, 39, 58);
+
+fn format_local_time(unix_secs: u64) -> String {
+    DateTime::from_timestamp(unix_secs as i64, 0)
+        .map(|dt| dt.with_timezone(&Local).format("%Y-%m-%d %H:%M").to_string())
+        .unwrap_or_else(|| "?".to_string())
+}
 
 fn elapsed_label(secs: u64) -> String {
     if secs < 60 {
@@ -142,7 +149,7 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
             .unwrap_or_default()
             .as_secs();
         let last_label = match app.pkg_last_checked {
-            Some(ts) => elapsed_label(now.saturating_sub(ts)),
+            Some(ts) => format_local_time(ts),
             None => "never".to_string(),
         };
         let unchecked = app.unchecked_count();

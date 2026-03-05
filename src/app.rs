@@ -314,7 +314,14 @@ impl App {
                 version_check::VersionMsg::Done(count) => {
                     self.checking_versions = false;
                     self.version_check_rx = None;
-                    self.pkg_last_checked = version_check::last_check_time();
+                    // Use current time — cache TTL hits don't update disk timestamps
+                    // but the user did just run a check, so "last checked" = now.
+                    self.pkg_last_checked = Some(
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs(),
+                    );
                     self.status_msg = Some(format!("Checked {} packages", count));
                     return;
                 }
