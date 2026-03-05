@@ -130,9 +130,6 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
                     format!("  |  void: {}", label),
                     Style::default().fg(color),
                 ));
-                if stale {
-                    spans.push(Span::styled("  g:sync", Style::default().fg(YELLOW)));
-                }
             }
         }
     }
@@ -144,21 +141,22 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        let (label, stale) = match app.pkg_last_checked {
-            Some(ts) => {
-                let secs = now.saturating_sub(ts);
-                (elapsed_label(secs), secs > 3 * 86400)
-            }
-            None => ("never".to_string(), true),
+        let last_label = match app.pkg_last_checked {
+            Some(ts) => elapsed_label(now.saturating_sub(ts)),
+            None => "never".to_string(),
         };
-        let color = if stale { YELLOW } else { OVERLAY0 };
-        spans.push(Span::styled(
-            format!("  |  pkgs: {}", label),
-            Style::default().fg(color),
-        ));
-        if stale {
-            spans.push(Span::styled("  U:check", Style::default().fg(YELLOW)));
-        }
+        let unchecked = app.unchecked_count();
+        let pkg_str = if unchecked > 0 {
+            format!("  |  pkgs: {} unchecked (last: {})", unchecked, last_label)
+        } else {
+            format!("  |  pkgs: last {}", last_label)
+        };
+        let stale = match app.pkg_last_checked {
+            Some(ts) => now.saturating_sub(ts) > 3 * 86400,
+            None => true,
+        };
+        let color = if stale || unchecked > 0 { YELLOW } else { OVERLAY0 };
+        spans.push(Span::styled(pkg_str, Style::default().fg(color)));
     }
 
     // GCC version

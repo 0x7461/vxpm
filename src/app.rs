@@ -751,6 +751,11 @@ impl App {
         self.build_log_scroll = self.build_log_scroll.saturating_sub(1);
     }
 
+    /// Packages with no known upstream version yet.
+    pub fn unchecked_count(&self) -> usize {
+        self.packages.iter().filter(|p| p.latest.is_none()).count()
+    }
+
     /// Get summary counts for status bar.
     pub fn status_counts(&self) -> StatusCounts {
         let mut counts = StatusCounts::default();
