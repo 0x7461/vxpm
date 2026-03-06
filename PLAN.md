@@ -101,7 +101,7 @@ Keybind: `U` on a package with UPDATE AVAIL status.
 - `./xbps-src pkg <name>` via Command with piped stdout
 - Build log streaming via `mpsc::channel` + background thread
 - Auto-rebuild: queue all reverse dependents in topological order
-- Failed builds → store error log in `~/.cache/vpm/build_history.json`, show BUILD FAILED status with reason in detail panel
+- Failed builds → store error log in `~/.cache/vxpm/build_history.json`, show BUILD FAILED status with reason in detail panel
 - **Never runs sudo** — after build, shows: `Run: xi pkg1 pkg2 ...`
 
 ### New Status
@@ -152,7 +152,7 @@ Keybind: `U` on a package with UPDATE AVAIL status.
 src/
 ├── shlibs.rs    # SONAME tracking: parse common/shlibs, readelf, mismatch detection, auto-update
 ├── gcc.rs       # GCC version gate: detect version, load requirements, block builds
-└── config.rs    # Config file: ~/.config/vpm/config.toml with ~ expansion
+└── config.rs    # Config file: ~/.config/vxpm/config.toml with ~ expansion
 ```
 
 ### 5a: Search/Filter
@@ -170,7 +170,7 @@ src/
 ### 5c: GCC Version Gate
 
 - Detect system GCC via `gcc -dumpversion`, show in header
-- Requirements in `~/.config/vpm/gcc_requirements.toml` (`[requirements]` table, `pkg = "major.minor"`)
+- Requirements in `~/.config/vxpm/gcc_requirements.toml` (`[requirements]` table, `pkg = "major.minor"`)
 - GCC-blocked packages show `GCC 15+` badge in RED, builds refused with warning
 - Guards on `build_selected`, `build_with_dependents`, `bump_and_build`, `rebuild_all`, `update_all`
 
@@ -188,14 +188,14 @@ src/
 
 ### 5g: Build Log Persistence
 
-- Full build output saved to `~/.cache/vpm/logs/<pkg>-<YYYYMMDD-HHMMSS>.log`
+- Full build output saved to `~/.cache/vxpm/logs/<pkg>-<YYYYMMDD-HHMMSS>.log`
 - Error lines appended to log on failure
 - Detail panel shows log path (RED for failed builds)
 - Old logs pruned to 5 per package at startup
 
 ### 5h: Config File
 
-- `~/.config/vpm/config.toml` — bootstrapped on first run
+- `~/.config/vxpm/config.toml` — bootstrapped on first run
 - `void_packages` key with `~` expansion, replaces hardcoded path
 
 ### Keybinds (complete, as of Phase 6)
@@ -225,9 +225,10 @@ src/
 ## Future Ideas
 
 - **Uncommitted templates**: show packages in `srcpkgs/` that aren't committed yet — badge them `UNCOMMITTED` so they're visible without needing `git add` first.
-- **Custom void templates via vpm**: explore creating/managing new package templates from within the TUI (scaffold, edit, commit flow).
+- **Custom void templates via vxpm**: explore creating/managing new package templates from within the TUI (scaffold, edit, commit flow).
 - **GitHub Actions releases**: some packages publish via GH Actions artifacts rather than the standard releases API — explore detecting these for version checks.
-- **vpm void package**: create an xbps-src template for vpm itself so it installs like any other package (`xi vpm`).
+- **vxpm published**: GitHub repo `0x7461/vxpm`, v0.1.0 released. xbps-src template at `~/void-packages/srcpkgs/vxpm/template` (binary repack). GH Actions builds `vxpm-linux-x86_64.tar.gz` on tag push — needs `permissions: contents: write` in workflow or upload fails with "Resource not accessible by integration".
+- **Re-tagging a release**: delete GH release (`gh release delete`), delete local+remote tag (`git tag -d` + `git push origin :refs/tags/`), re-tag at latest commit, push tag, recreate release. Use this instead of bumping version for pre-user fixes.
 
 ---
 
@@ -238,7 +239,7 @@ src/
 - **Zed binary layout**: `bin/zed` (CLI launcher) looks for `../libexec/zed-editor` relative to itself. Template must preserve the `bin/` + `libexec/` sibling relationship — can't put both flat in the same dir.
 - **Zed distfiles**: the `zed.dev/api/releases/stable/latest/` URL is a redirect to the current release — checksum breaks on upstream updates. Pin to `github.com/zed-industries/zed/releases/download/v${version}/` instead.
 - **Zed desktop file renamed**: as of ~0.224, the desktop file changed from `share/applications/zed.desktop` to `share/applications/dev.zed.Zed.desktop`. Check tarball with `tar -tzf ... | grep desktop` when bump fails in do_install.
-- **Ollama binary repack**: tarball (`ollama-linux-amd64.tar.zst`) has no top-level dir — use `create_wrksrc=yes`. CUDA runners (`lib/ollama/cuda_v12/`, `lib/ollama/cuda_v13/`) drag in `libcuda.so.1` which has no Void package — skip them in `do_install`, install CPU + Vulkan runners only. `vpm` only discovers committed templates — must `git add && git commit` before package appears in TUI.
+- **Ollama binary repack**: tarball (`ollama-linux-amd64.tar.zst`) has no top-level dir — use `create_wrksrc=yes`. CUDA runners (`lib/ollama/cuda_v12/`, `lib/ollama/cuda_v13/`) drag in `libcuda.so.1` which has no Void package — skip them in `do_install`, install CPU + Vulkan runners only. `vxpm` discovers both committed and uncommitted templates — uncommitted ones show with an `UNCOMMITTED` badge.
 - **Status priority when not installed**: if a built .xbps exists but package isn't installed, status should be BUILD READY (actionable) not NOT INSTALLED (implies nothing is built).
 - **Header staleness hints**: dropped keybind hints from header (covered by `?` panel). Header shows void fetch age and pkg check info. Pkg check: `"N unchecked (last: YYYY-MM-DD HH:MM)"` or `"last YYYY-MM-DD HH:MM"` — uses exact local timestamp via chrono.
 - **pkg_last_checked TTL trap**: `last_check_time()` reads disk cache. If version check hits TTL (< 1h), no disk timestamps are updated → `last_check_time()` returns same old value → header appears unchanged. Fix: set `pkg_last_checked = SystemTime::now()` directly in `poll_version_check` Done handler, not from cache.
