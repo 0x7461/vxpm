@@ -31,11 +31,11 @@ jobs:
       - name: Create archive
         run: |
           mkdir -p dist
-          cp target/release/vpm dist/
+          cp target/release/vxpm dist/
           cp LICENSE README.md dist/
-          tar -czf vpm-linux-x86_64.tar.gz -C dist .
+          tar -czf vxpm-linux-x86_64.tar.gz -C dist .
 
       - name: Upload to release
         uses: softprops/action-gh-release@v2
         with:
-          files: vpm-linux-x86_64.tar.gz
+          files: vxpm-linux-x86_64.tar.gz
