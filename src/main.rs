@@ -34,9 +34,15 @@ fn main() -> Result<()> {
 }
 
 fn dump(cfg: &config::Config) -> Result<()> {
-    let names = repo::discover_custom_packages(&cfg.void_packages)?;
+    let committed = repo::discover_custom_packages(&cfg.void_packages)?;
+    let committed_set: std::collections::HashSet<String> = committed.iter().cloned().collect();
+    let uncommitted = repo::discover_uncommitted_packages(&cfg.void_packages, &committed_set);
+    let mut names = committed;
+    names.extend(uncommitted.iter().cloned());
+    names.sort();
+    let uncommitted_set: std::collections::HashSet<String> = uncommitted.into_iter().collect();
     let packages = repo::load_packages(&cfg.void_packages, &names);
-    let states = repo::build_package_states(&cfg.void_packages, packages);
+    let states = repo::build_package_states(&cfg.void_packages, packages, &uncommitted_set);
 
     let json = serde_json::to_string_pretty(&states)?;
     println!("{}", json);

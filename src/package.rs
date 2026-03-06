@@ -28,6 +28,7 @@ pub struct PackageState {
     pub built: Option<String>,
     pub latest: Option<String>,
     pub status: Status,
+    pub uncommitted: bool,
     #[serde(skip)]
     pub shlibs: Vec<ShlibEntry>,
     #[serde(skip)]

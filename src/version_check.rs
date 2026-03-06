@@ -27,7 +27,7 @@ struct GitHubRelease {
 }
 
 fn cache_path() -> PathBuf {
-    let dir = dirs_cache().join("vpm");
+    let dir = dirs_cache().join("vxpm");
     fs::create_dir_all(&dir).ok();
     dir.join("versions.json")
 }

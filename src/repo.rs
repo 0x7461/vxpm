@@ -41,6 +41,52 @@ pub fn discover_custom_packages(void_pkgs: &Path) -> Result<Vec<String>> {
     Ok(result)
 }
 
+/// Discover packages in srcpkgs/ that aren't committed to the custom branch yet.
+/// Catches untracked (??) and staged-but-uncommitted (A ) templates.
+pub fn discover_uncommitted_packages(void_pkgs: &Path, committed: &HashSet<String>) -> Vec<String> {
+    let output = match Command::new("git")
+        .args(["status", "--porcelain", "srcpkgs/"])
+        .current_dir(void_pkgs)
+        .output()
+    {
+        Ok(o) => o,
+        Err(_) => return Vec::new(),
+    };
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let srcpkgs = void_pkgs.join("srcpkgs");
+    let mut names: HashSet<String> = HashSet::new();
+
+    for line in stdout.lines() {
+        if line.len() < 4 {
+            continue;
+        }
+        let status = &line[..2];
+        let path = line[3..].trim();
+        // Only care about untracked (??) and staged-new (A )
+        if status != "??" && status != "A " {
+            continue;
+        }
+        // Path looks like "srcpkgs/foo/" or "srcpkgs/foo/template"
+        let parts: Vec<&str> = path.split('/').collect();
+        if parts.len() < 2 || parts[0] != "srcpkgs" {
+            continue;
+        }
+        let name = parts[1].to_string();
+        if committed.contains(&name) {
+            continue;
+        }
+        let pkg_dir = srcpkgs.join(&name);
+        if !pkg_dir.is_symlink() && pkg_dir.join("template").exists() {
+            names.insert(name);
+        }
+    }
+
+    let mut result: Vec<String> = names.into_iter().collect();
+    result.sort();
+    result
+}
+
 /// Parse all discovered packages.
 pub fn load_packages(void_pkgs: &Path, names: &[String]) -> Vec<Package> {
     names
@@ -122,19 +168,21 @@ pub fn find_built_xbps(void_pkgs: &Path, name: &str) -> Option<String> {
 }
 
 /// Build full PackageState for all packages.
-pub fn build_package_states(void_pkgs: &Path, packages: Vec<Package>) -> Vec<PackageState> {
+pub fn build_package_states(void_pkgs: &Path, packages: Vec<Package>, uncommitted: &HashSet<String>) -> Vec<PackageState> {
     packages
         .into_iter()
         .map(|pkg| {
             let installed = query_installed(&pkg.name);
             let built = find_built_xbps(void_pkgs, &pkg.name);
             let status = PackageState::compute_status(&pkg, &installed, &built, &None);
+            let is_uncommitted = uncommitted.contains(&pkg.name);
             PackageState {
                 package: pkg,
                 installed,
                 built,
                 latest: None,
                 status,
+                uncommitted: is_uncommitted,
                 shlibs: Vec::new(),
                 soname_mismatches: Vec::new(),
                 build_log: None,

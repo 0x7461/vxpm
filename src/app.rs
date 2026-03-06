@@ -68,10 +68,16 @@ pub struct App {
 
 impl App {
     pub fn new(void_pkgs: PathBuf) -> anyhow::Result<Self> {
-        let names = repo::discover_custom_packages(&void_pkgs)?;
+        let committed = repo::discover_custom_packages(&void_pkgs)?;
+        let committed_set: std::collections::HashSet<String> = committed.iter().cloned().collect();
+        let uncommitted = repo::discover_uncommitted_packages(&void_pkgs, &committed_set);
+        let mut names = committed;
+        names.extend(uncommitted.iter().cloned());
+        names.sort();
+        let uncommitted_set: std::collections::HashSet<String> = uncommitted.into_iter().collect();
         let packages = repo::load_packages(&void_pkgs, &names);
         let dep_graph = DepGraph::build(&packages);
-        let mut states = repo::build_package_states(&void_pkgs, packages);
+        let mut states = repo::build_package_states(&void_pkgs, packages, &uncommitted_set);
 
         let git_status = git::get_git_status(&void_pkgs);
         let shlib_map = shlibs::parse_shlibs(&void_pkgs);
@@ -191,10 +197,16 @@ impl App {
     }
 
     pub fn refresh(&mut self) {
-        if let Ok(names) = repo::discover_custom_packages(&self.void_pkgs) {
+        if let Ok(committed) = repo::discover_custom_packages(&self.void_pkgs) {
+            let committed_set: std::collections::HashSet<String> = committed.iter().cloned().collect();
+            let uncommitted = repo::discover_uncommitted_packages(&self.void_pkgs, &committed_set);
+            let mut names = committed;
+            names.extend(uncommitted.iter().cloned());
+            names.sort();
+            let uncommitted_set: std::collections::HashSet<String> = uncommitted.into_iter().collect();
             let packages = repo::load_packages(&self.void_pkgs, &names);
             self.dep_graph = DepGraph::build(&packages);
-            let mut states = repo::build_package_states(&self.void_pkgs, packages);
+            let mut states = repo::build_package_states(&self.void_pkgs, packages, &uncommitted_set);
 
             // Preserve latest versions and build-failed overrides from previous state
             let old_latest: std::collections::HashMap<String, String> = self

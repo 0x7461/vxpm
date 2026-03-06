@@ -235,7 +235,11 @@ fn draw_package_list(
             };
 
             // Build status label with optional badges
-            let mut status_label = ps.status.label().to_string();
+            let mut status_label = if ps.uncommitted {
+                "UNCOMMITTED".to_string()
+            } else {
+                ps.status.label().to_string()
+            };
             if !ps.soname_mismatches.is_empty() {
                 status_label.push_str(" !so");
             }
@@ -244,7 +248,9 @@ fn draw_package_list(
                 status_label.push_str(&format!(" GCC {}+", req));
             }
 
-            let status_fg = if !ps.soname_mismatches.is_empty() || gcc_info.is_blocked(&ps.package.name) {
+            let status_fg = if ps.uncommitted {
+                OVERLAY0
+            } else if !ps.soname_mismatches.is_empty() || gcc_info.is_blocked(&ps.package.name) {
                 if ps.status == Status::UpToDate { PEACH } else { status_color(&ps.status) }
             } else {
                 status_color(&ps.status)
@@ -435,8 +441,14 @@ fn draw_detail(f: &mut Frame, app: &App, area: Rect) {
                 selected.status.label(),
                 Style::default().fg(status_color(&selected.status)).add_modifier(Modifier::BOLD),
             ),
-            Span::styled("  — ", Style::default().fg(OVERLAY0)),
-            Span::styled(selected.action_hint(), Style::default().fg(OVERLAY0)),
+            if selected.uncommitted {
+                Span::styled("  UNCOMMITTED — git add && git commit to track", Style::default().fg(OVERLAY0))
+            } else {
+                Span::styled(
+                    format!("  — {}", selected.action_hint()),
+                    Style::default().fg(OVERLAY0),
+                )
+            },
         ]),
         Line::from(vec![
             Span::styled("  upstream:  ", Style::default().fg(OVERLAY0)),
