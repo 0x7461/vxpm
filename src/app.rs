@@ -66,17 +66,26 @@ pub struct App {
     pub template_bumping: bool,
 }
 
+/// Discover and load all packages (committed + uncommitted).
+/// Returns (packages, dep_graph, uncommitted_set).
+fn discover_and_load(
+    void_pkgs: &std::path::Path,
+) -> anyhow::Result<(Vec<crate::package::Package>, DepGraph, std::collections::HashSet<String>)> {
+    let committed = repo::discover_custom_packages(void_pkgs)?;
+    let committed_set: std::collections::HashSet<String> = committed.iter().cloned().collect();
+    let uncommitted = repo::discover_uncommitted_packages(void_pkgs, &committed_set);
+    let mut names = committed;
+    names.extend(uncommitted.iter().cloned());
+    names.sort();
+    let uncommitted_set: std::collections::HashSet<String> = uncommitted.into_iter().collect();
+    let packages = repo::load_packages(void_pkgs, &names);
+    let dep_graph = DepGraph::build(&packages);
+    Ok((packages, dep_graph, uncommitted_set))
+}
+
 impl App {
     pub fn new(void_pkgs: PathBuf) -> anyhow::Result<Self> {
-        let committed = repo::discover_custom_packages(&void_pkgs)?;
-        let committed_set: std::collections::HashSet<String> = committed.iter().cloned().collect();
-        let uncommitted = repo::discover_uncommitted_packages(&void_pkgs, &committed_set);
-        let mut names = committed;
-        names.extend(uncommitted.iter().cloned());
-        names.sort();
-        let uncommitted_set: std::collections::HashSet<String> = uncommitted.into_iter().collect();
-        let packages = repo::load_packages(&void_pkgs, &names);
-        let dep_graph = DepGraph::build(&packages);
+        let (packages, dep_graph, uncommitted_set) = discover_and_load(&void_pkgs)?;
         let mut states = repo::build_package_states(&void_pkgs, packages, &uncommitted_set);
 
         let git_status = git::get_git_status(&void_pkgs);
@@ -197,15 +206,8 @@ impl App {
     }
 
     pub fn refresh(&mut self) {
-        if let Ok(committed) = repo::discover_custom_packages(&self.void_pkgs) {
-            let committed_set: std::collections::HashSet<String> = committed.iter().cloned().collect();
-            let uncommitted = repo::discover_uncommitted_packages(&self.void_pkgs, &committed_set);
-            let mut names = committed;
-            names.extend(uncommitted.iter().cloned());
-            names.sort();
-            let uncommitted_set: std::collections::HashSet<String> = uncommitted.into_iter().collect();
-            let packages = repo::load_packages(&self.void_pkgs, &names);
-            self.dep_graph = DepGraph::build(&packages);
+        if let Ok((packages, dep_graph, uncommitted_set)) = discover_and_load(&self.void_pkgs) {
+            self.dep_graph = dep_graph;
             let mut states = repo::build_package_states(&self.void_pkgs, packages, &uncommitted_set);
 
             // Preserve latest versions and build-failed overrides from previous state
@@ -471,11 +473,7 @@ impl App {
                 }
                 BuildMsg::Output(_name, line) => {
                     self.build_queue.current_output.push(line);
-                    // Keep only last 200 lines in memory
-                    if self.build_queue.current_output.len() > 200 {
-                        let drain = self.build_queue.current_output.len() - 200;
-                        self.build_queue.current_output.drain(..drain);
-                    }
+                    // Trim deferred to after the loop — O(1) amortized vs O(n²) drain per msg
                 }
                 BuildMsg::Finished(name, log_path) => {
                     for job in &mut self.build_queue.jobs {
@@ -549,6 +547,12 @@ impl App {
                     }
                 }
             }
+        }
+
+        // Trim output buffer once after processing all messages (avoids O(n²) drain per message).
+        let out = &mut self.build_queue.current_output;
+        if out.len() > 200 {
+            out.drain(..out.len() - 200);
         }
     }
 
@@ -659,12 +663,17 @@ impl App {
             .map(|(_, old, new, pkgver)| (old.clone(), new.clone(), pkgver.clone()))
             .collect();
 
-        shlibs::update_shlibs_file(&self.void_pkgs, &updates);
-
-        let count = self.shlib_updates.len();
-        self.shlib_updates.clear();
-        self.refresh();
-        self.status_msg = Some(format!("Updated {} shlib entries", count));
+        match shlibs::update_shlibs_file(&self.void_pkgs, &updates) {
+            Ok(()) => {
+                let count = self.shlib_updates.len();
+                self.shlib_updates.clear();
+                self.refresh();
+                self.status_msg = Some(format!("Updated {} shlib entries", count));
+            }
+            Err(e) => {
+                self.status_msg = Some(format!("Failed to write common/shlibs: {}", e));
+            }
+        }
     }
 
     /// Handle cancel build: double-Esc within 2 seconds.

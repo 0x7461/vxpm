@@ -5,8 +5,6 @@ use std::process::Command;
 #[derive(Debug, Clone)]
 pub struct ShlibEntry {
     pub soname: String,
-    #[allow(dead_code)]
-    pub pkg_ver: String,
 }
 
 #[derive(Debug, Clone)]
@@ -40,17 +38,16 @@ pub fn parse_shlibs(void_pkgs: &Path) -> ShlibMap {
         }
 
         let soname = parts[0].to_string();
-        let pkg_ver = parts[1].to_string();
 
-        // Extract package name: everything before the last '-'
-        let pkg_name = match pkg_ver.rfind('-') {
-            Some(idx) => pkg_ver[..idx].to_string(),
+        // Extract package name from "pkgname-ver_rev": everything before the last '-'
+        let pkg_name = match parts[1].rfind('-') {
+            Some(idx) => parts[1][..idx].to_string(),
             None => continue,
         };
 
         map.entry(pkg_name)
             .or_default()
-            .push(ShlibEntry { soname, pkg_ver });
+            .push(ShlibEntry { soname });
     }
 
     map
@@ -150,12 +147,9 @@ pub fn check_soname_mismatches(
 
 /// Update common/shlibs file with new SONAME entries.
 /// Each tuple is (old_soname, new_soname, new_pkg_ver).
-pub fn update_shlibs_file(void_pkgs: &Path, updates: &[(String, String, String)]) {
+pub fn update_shlibs_file(void_pkgs: &Path, updates: &[(String, String, String)]) -> Result<(), std::io::Error> {
     let shlibs_path = void_pkgs.join("common/shlibs");
-    let content = match std::fs::read_to_string(&shlibs_path) {
-        Ok(c) => c,
-        Err(_) => return,
-    };
+    let content = std::fs::read_to_string(&shlibs_path)?;
 
     let mut lines: Vec<String> = content.lines().map(|l| l.to_string()).collect();
 
@@ -183,7 +177,7 @@ pub fn update_shlibs_file(void_pkgs: &Path, updates: &[(String, String, String)]
         new_content
     };
 
-    let _ = std::fs::write(&shlibs_path, final_content);
+    std::fs::write(&shlibs_path, final_content)
 }
 
 /// Extract base library name: "libfoo.so.4" -> "libfoo.so"

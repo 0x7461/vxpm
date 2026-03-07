@@ -81,9 +81,12 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             .split(f.area())
     };
 
-    draw_header(f, app, chunks[0]);
+    let visible = app.visible_packages();
+    let visible_len = visible.len();
+    let visible_indices: Vec<usize> = visible.iter().map(|(i, _)| *i).collect();
+    drop(visible);
 
-    let visible_indices: Vec<usize> = app.visible_packages().iter().map(|(i, _)| *i).collect();
+    draw_header(f, app, chunks[0], visible_len);
     match app.view {
         View::List => draw_package_list(f, &mut app.table_state, app.selected, &app.packages, &visible_indices, &app.gcc_info, chunks[1]),
         View::Tree => draw_tree_view(f, app, chunks[1]),
@@ -103,7 +106,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     }
 }
 
-fn draw_header(f: &mut Frame, app: &App, area: Rect) {
+fn draw_header(f: &mut Frame, app: &App, area: Rect, visible_len: usize) {
     let mut spans = vec![
         Span::styled(" VPM ", Style::default().fg(BASE).bg(TEAL).add_modifier(Modifier::BOLD)),
         Span::styled(" Void Package Manager", Style::default().fg(TEXT)),
@@ -178,7 +181,6 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
         spans.push(Span::styled("  / ", Style::default().fg(TEAL).add_modifier(Modifier::BOLD)));
         spans.push(Span::styled(&app.filter, Style::default().fg(TEXT)));
         spans.push(Span::styled("█", Style::default().fg(TEXT)));
-        let visible_len = app.visible_packages().len();
         spans.push(Span::styled(
             format!("  {}/{}", visible_len, app.packages.len()),
             Style::default().fg(OVERLAY0),
@@ -186,7 +188,6 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
     } else if !app.filter.is_empty() {
         spans.push(Span::styled("  filter: ", Style::default().fg(OVERLAY0)));
         spans.push(Span::styled(&app.filter, Style::default().fg(TEXT)));
-        let visible_len = app.visible_packages().len();
         spans.push(Span::styled(
             format!("  {}/{}", visible_len, app.packages.len()),
             Style::default().fg(OVERLAY0),

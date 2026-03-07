@@ -4,11 +4,9 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
-#[allow(dead_code)]
 pub struct BumpResult {
     pub old_version: String,
     pub new_version: String,
-    pub new_checksum: String,
 }
 
 /// Bump a template to a new version: rewrite version, reset revision, update checksum.
@@ -43,7 +41,6 @@ pub fn bump_template(void_pkgs: &Path, name: &str, new_version: &str) -> Result<
     Ok(BumpResult {
         old_version,
         new_version: new_version.to_string(),
-        new_checksum,
     })
 }
 
@@ -109,13 +106,16 @@ fn resolve_distfiles_url(raw: &str, vars: &HashMap<String, String>, new_version:
     // Substitute ${version} with new version
     url = url.replace("${version}", new_version);
 
-    // Substitute other known variables
-    for (key, val) in vars {
+    // Substitute other known variables. Sort longest key first so that a key
+    // which is a prefix of another (e.g. $foo vs $foobar) doesn't corrupt the
+    // longer match before it gets a chance to be replaced.
+    let mut sorted_keys: Vec<&String> = vars.keys().collect();
+    sorted_keys.sort_by(|a, b| b.len().cmp(&a.len()));
+    for key in sorted_keys {
         if key == "version" {
             continue; // already handled
         }
-        // Replace val that itself references ${version}
-        let resolved_val = val.replace("${version}", new_version);
+        let resolved_val = vars[key].replace("${version}", new_version);
         url = url.replace(&format!("${{{}}}", key), &resolved_val);
         url = url.replace(&format!("${}", key), &resolved_val);
     }

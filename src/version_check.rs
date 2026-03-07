@@ -35,8 +35,10 @@ fn cache_path() -> PathBuf {
 fn dirs_cache() -> PathBuf {
     if let Ok(xdg) = std::env::var("XDG_CACHE_HOME") {
         PathBuf::from(xdg)
+    } else if let Ok(home) = std::env::var("HOME") {
+        PathBuf::from(format!("{}/.cache", home))
     } else {
-        PathBuf::from(format!("{}/.cache", env!("HOME")))
+        PathBuf::from("/tmp")
     }
 }
 

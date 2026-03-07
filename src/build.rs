@@ -77,7 +77,8 @@ impl BuildHistory {
 
     fn path() -> PathBuf {
         let cache = std::env::var("XDG_CACHE_HOME")
-            .unwrap_or_else(|_| format!("{}/.cache", env!("HOME")));
+            .or_else(|_| std::env::var("HOME").map(|h| format!("{}/.cache", h)))
+            .unwrap_or_else(|_| "/tmp".to_string());
         PathBuf::from(cache).join("vpm/build_history.json")
     }
 }
@@ -115,46 +116,13 @@ impl BuildLog {
 
 fn log_dir() -> PathBuf {
     let cache = std::env::var("XDG_CACHE_HOME")
-        .unwrap_or_else(|_| format!("{}/.cache", env!("HOME")));
+        .or_else(|_| std::env::var("HOME").map(|h| format!("{}/.cache", h)))
+        .unwrap_or_else(|_| "/tmp".to_string());
     PathBuf::from(cache).join("vpm/logs")
 }
 
 fn chrono_timestamp() -> String {
-    // YYYYMMDD-HHMMSS without pulling in chrono crate
-    let secs = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-
-    // Simple UTC conversion
-    let days = secs / 86400;
-    let time_of_day = secs % 86400;
-    let hours = time_of_day / 3600;
-    let minutes = (time_of_day % 3600) / 60;
-    let seconds = time_of_day % 60;
-
-    // Days since epoch to Y/M/D (simplified Gregorian)
-    let (year, month, day) = days_to_ymd(days);
-
-    format!(
-        "{:04}{:02}{:02}-{:02}{:02}{:02}",
-        year, month, day, hours, minutes, seconds
-    )
-}
-
-fn days_to_ymd(days: u64) -> (u64, u64, u64) {
-    // Algorithm from http://howardhinnant.github.io/date_algorithms.html
-    let z = days + 719468;
-    let era = z / 146097;
-    let doe = z - era * 146097;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = if m <= 2 { y + 1 } else { y };
-    (y, m, d)
+    chrono::Local::now().format("%Y%m%d-%H%M%S").to_string()
 }
 
 /// Prune old build logs, keeping at most `max_per_pkg` per package.
@@ -255,21 +223,45 @@ fn run_build_queue(void_pkgs: PathBuf, names: Vec<String>, tx: Sender<BuildMsg>,
 
         match result {
             Ok(mut child) => {
-                // Read stdout line by line
-                if let Some(stdout) = child.stdout.take() {
-                    let reader = std::io::BufReader::new(stdout);
-                    for line in reader.lines() {
-                        if cancel.load(Ordering::SeqCst) {
-                            let _ = child.kill();
-                            break;
-                        }
-                        if let Ok(line) = line {
-                            if let Some(ref mut log) = build_log {
+                let stdout = child.stdout.take();
+                let stderr = child.stderr.take();
+
+                // Read stdout in a background thread concurrently with stderr to prevent
+                // buffer deadlock when xbps-src writes >64KB to either stream.
+                let tx2 = tx.clone();
+                let name2 = name.clone();
+                let cancel2 = cancel.clone();
+                let mut log_for_thread = build_log.take();
+                let stdout_handle = std::thread::spawn(move || {
+                    if let Some(out) = stdout {
+                        let reader = std::io::BufReader::new(out);
+                        for line in reader.lines().map_while(Result::ok) {
+                            if cancel2.load(Ordering::SeqCst) {
+                                break;
+                            }
+                            if let Some(ref mut log) = log_for_thread {
                                 log.write_line(&line);
                             }
-                            let _ = tx.send(BuildMsg::Output(name.clone(), line));
+                            let _ = tx2.send(BuildMsg::Output(name2.clone(), line));
                         }
                     }
+                    log_for_thread
+                });
+
+                // Read stderr on this thread concurrently, buffering for error reporting.
+                let stderr_lines: Vec<String> = if let Some(err) = stderr {
+                    std::io::BufReader::new(err)
+                        .lines()
+                        .map_while(Result::ok)
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+
+                let build_log = stdout_handle.join().ok().flatten();
+
+                if cancel.load(Ordering::SeqCst) {
+                    let _ = child.kill();
                 }
 
                 let log_path = build_log.map(|l| l.finish()).unwrap_or_default();
@@ -279,23 +271,19 @@ fn run_build_queue(void_pkgs: PathBuf, names: Vec<String>, tx: Sender<BuildMsg>,
                         let _ = tx.send(BuildMsg::Finished(name.clone(), log_path));
                     }
                     Ok(_) => {
-                        // Capture stderr for error info
-                        let error_lines = if let Some(stderr) = child.stderr.take() {
-                            let reader = std::io::BufReader::new(stderr);
-                            let all: Vec<String> = reader.lines().filter_map(|l| l.ok()).collect();
-                            let start = all.len().saturating_sub(50);
-                            all[start..].to_vec()
-                        } else {
-                            vec!["Build failed with non-zero exit code".to_string()]
-                        };
-                        // Write errors to log too
                         if log_path != PathBuf::new() {
                             if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open(&log_path) {
-                                for line in &error_lines {
+                                for line in &stderr_lines {
                                     let _ = writeln!(f, "ERR: {}", line);
                                 }
                             }
                         }
+                        let start = stderr_lines.len().saturating_sub(50);
+                        let error_lines = if stderr_lines.is_empty() {
+                            vec!["Build failed with non-zero exit code".to_string()]
+                        } else {
+                            stderr_lines[start..].to_vec()
+                        };
                         let _ = tx.send(BuildMsg::Failed(name.clone(), error_lines, log_path));
                     }
                     Err(e) => {

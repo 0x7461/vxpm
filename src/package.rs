@@ -57,16 +57,7 @@ impl Status {
         }
     }
 
-    #[allow(dead_code)]
-    pub fn priority(&self) -> u8 {
-        match self {
-            Status::BuildFailed => 0,
-            Status::UpstreamAhead => 1,
-            Status::BuildOutdated => 2,
-            Status::ReadyToInstall => 3,
-            Status::UpToDate => 4,
-        }
-    }
+
 }
 
 impl PackageState {
@@ -136,23 +127,32 @@ pub fn version_newer_pub(a: &str, b: &str) -> bool {
 }
 
 /// Compare two version strings. Returns true if `a` is newer than `b`.
-/// Simple comparison: split on '.', compare numeric parts left to right.
+/// Splits on '.', compares numeric parts left to right. Parts with non-numeric
+/// suffixes (e.g. "0beta1") are treated as prereleases, older than the same
+/// number without a suffix ("0"). So "0.45.0" > "0.45.0beta1".
 fn version_newer(a: &str, b: &str) -> bool {
-    let parse = |s: &str| -> Vec<u64> {
-        s.split('.')
-            .map(|p| p.parse::<u64>().unwrap_or(0))
-            .collect()
+    // Returns (numeric_prefix, has_prerelease_suffix)
+    let parse_part = |p: &str| -> (u64, bool) {
+        let num_end = p.find(|c: char| !c.is_ascii_digit()).unwrap_or(p.len());
+        let num: u64 = p[..num_end].parse().unwrap_or(0);
+        (num, num_end < p.len())
     };
-    let va = parse(a);
-    let vb = parse(b);
-    for i in 0..va.len().max(vb.len()) {
-        let pa = va.get(i).copied().unwrap_or(0);
-        let pb = vb.get(i).copied().unwrap_or(0);
-        if pa > pb {
+    let parts_a: Vec<&str> = a.split('.').collect();
+    let parts_b: Vec<&str> = b.split('.').collect();
+    for i in 0..parts_a.len().max(parts_b.len()) {
+        let (na, pre_a) = parse_part(parts_a.get(i).copied().unwrap_or("0"));
+        let (nb, pre_b) = parse_part(parts_b.get(i).copied().unwrap_or("0"));
+        if na > nb {
             return true;
         }
-        if pa < pb {
+        if na < nb {
             return false;
+        }
+        // Same numeric value: prerelease < release
+        match (pre_a, pre_b) {
+            (true, false) => return false, // a is prerelease, b is release
+            (false, true) => return true,  // a is release, b is prerelease
+            _ => {}
         }
     }
     false
@@ -225,29 +225,31 @@ pub fn parse_template(path: &Path) -> Result<Package> {
             || trimmed.starts_with("rm ")
             || trimmed.starts_with("local ")
             || trimmed.starts_with("pkg_install")
-            || trimmed.starts_with("depends=")
-                && trimmed.contains("sourcepkg")
+            || (trimmed.starts_with("depends=") && trimmed.contains("sourcepkg"))
         {
             continue;
         }
 
         // Handle append: var+=" value"
         if let Some(idx) = trimmed.find("+=") {
-            let varname = trimmed[..idx].trim().to_string();
+            let varname = trimmed[..idx].trim();
             let rest = trimmed[idx + 2..].trim();
-            let val = unquote(rest);
-            let existing = vars.entry(varname).or_default();
-            if !existing.is_empty() {
-                existing.push(' ');
-            }
-            // Handle multiline append
             if rest.starts_with('"') && !rest[1..].contains('"') {
-                // Opening quote but no closing — multiline
-                let varkey = trimmed[..idx].trim();
-                let existing_val = vars.get(varkey).cloned().unwrap_or_default();
-                multiline_buf = format!("{} {}", existing_val, val);
-                in_multiline = Some(varkey.to_string());
+                // Multiline append: opening quote but no closing
+                let existing_val = vars.get(varname).cloned().unwrap_or_default();
+                let initial = rest[1..].trim(); // strip opening quote
+                multiline_buf = if existing_val.is_empty() {
+                    initial.to_string()
+                } else {
+                    format!("{} {}", existing_val, initial)
+                };
+                in_multiline = Some(varname.to_string());
             } else {
+                let val = unquote(rest);
+                let existing = vars.entry(varname.to_string()).or_default();
+                if !existing.is_empty() {
+                    existing.push(' ');
+                }
                 existing.push_str(&val);
             }
             continue;
@@ -345,6 +347,12 @@ mod tests {
         assert!(version_newer("1.0.0", "0.99.99"));
         assert!(!version_newer("0.11.0", "0.11.0"));
         assert!(!version_newer("0.10.0", "0.11.0"));
+        // Prerelease suffixes: release > prerelease of same number
+        assert!(version_newer("0.45.0", "0.45.0beta1"));
+        assert!(!version_newer("0.45.0beta1", "0.45.0"));
+        assert!(!version_newer("0.45.0beta1", "0.45.0beta1"));
+        // Cross-digit boundary (was broken with lexicographic comparison)
+        assert!(version_newer("10.0.0", "9.0.0"));
     }
 
     #[test]

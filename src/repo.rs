@@ -154,7 +154,11 @@ pub fn find_built_xbps(void_pkgs: &Path, name: &str) -> Option<String> {
                     if let Some(dot_idx) = without_xbps.rfind('.') {
                         let ver_rev = &without_xbps[..dot_idx];
                         if !ver_rev.is_empty() {
-                            if best.is_none() || best.as_deref().unwrap_or("") < ver_rev {
+                            let is_newer = match &best {
+                                None => true,
+                                Some(b) => crate::package::version_newer_pub(ver_rev, b),
+                            };
+                            if is_newer {
                                 best = Some(ver_rev.to_string());
                             }
                         }
