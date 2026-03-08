@@ -114,6 +114,13 @@ fn check_github(owner: &str, repo: &str) -> Result<Option<String>> {
         .send()?;
 
     if !resp.status().is_success() {
+        // Detect rate limit before trying fallback — no point hitting tags endpoint either
+        if resp.status() == reqwest::StatusCode::FORBIDDEN
+            || resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS
+        {
+            return Err(anyhow::anyhow!("rate_limited"));
+        }
+
         // Try tags endpoint as fallback (some repos don't use releases)
         let url = format!(
             "https://api.github.com/repos/{}/{}/tags?per_page=1",
@@ -178,7 +185,7 @@ pub fn last_check_time() -> Option<u64> {
 
 pub enum VersionMsg {
     Found(String, String), // (name, version)
-    Done(usize),           // total count checked
+    Done(usize, bool),     // (packages attempted, rate_limited)
 }
 
 /// Check all packages for upstream versions, sending results incrementally.
@@ -193,12 +200,13 @@ pub fn check_all_versions_streaming(
     let mut count = 0;
 
     for pkg in packages {
+        count += 1;
+
         // Check cache first
         if !force {
             if let Some(entry) = cache.entries.get(&pkg.name) {
                 if now - entry.timestamp < CACHE_TTL_SECS {
                     let _ = tx.send(VersionMsg::Found(pkg.name.clone(), entry.version.clone()));
-                    count += 1;
                     continue;
                 }
             }
@@ -208,6 +216,11 @@ pub fn check_all_versions_streaming(
         let version = if let Some((owner, repo)) = extract_github_repo(pkg) {
             match check_github(&owner, &repo) {
                 Ok(Some(v)) => Some(v),
+                Err(e) if e.to_string() == "rate_limited" => {
+                    save_cache(&cache);
+                    let _ = tx.send(VersionMsg::Done(count, true));
+                    return;
+                }
                 _ => check_xbps_src(void_pkgs, &pkg.name).ok().flatten(),
             }
         } else {
@@ -223,11 +236,10 @@ pub fn check_all_versions_streaming(
                 },
             );
             let _ = tx.send(VersionMsg::Found(pkg.name.clone(), ver));
-            count += 1;
         }
     }
 
     save_cache(&cache);
-    let _ = tx.send(VersionMsg::Done(count));
+    let _ = tx.send(VersionMsg::Done(count, false));
 }
 

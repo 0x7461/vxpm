@@ -325,7 +325,7 @@ impl App {
                     }
                     self.status_msg = Some(format!("Checked {}...", name));
                 }
-                version_check::VersionMsg::Done(count) => {
+                version_check::VersionMsg::Done(count, rate_limited) => {
                     self.checking_versions = false;
                     self.version_check_rx = None;
                     // Use current time — cache TTL hits don't update disk timestamps
@@ -336,7 +336,11 @@ impl App {
                             .unwrap_or_default()
                             .as_secs(),
                     );
-                    self.status_msg = Some(format!("Checked {} packages", count));
+                    self.status_msg = Some(if rate_limited {
+                        format!("Checked {}/{} packages — GitHub rate limited (wait ~1hr or set GITHUB_TOKEN)", count, self.packages.len())
+                    } else {
+                        format!("Checked {} packages", count)
+                    });
                     return;
                 }
             }
@@ -483,6 +487,8 @@ impl App {
                     }
                     // Store log path and check for shlib updates
                     let log_str = log_path.to_string_lossy().to_string();
+                    // Drop any stale entries for this package before adding fresh ones
+                    self.shlib_updates.retain(|(pkg, _, _, _)| pkg != &name);
                     for state in &mut self.packages {
                         if state.package.name == name {
                             state.build_log = Some(log_str.clone());
