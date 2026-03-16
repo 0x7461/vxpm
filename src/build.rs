@@ -125,6 +125,13 @@ fn chrono_timestamp() -> String {
     chrono::Local::now().format("%Y%m%d-%H%M%S").to_string()
 }
 
+/// Return the path for a new bump log file, creating the directory if needed.
+pub fn bump_log_path(name: &str) -> PathBuf {
+    let dir = log_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    dir.join(format!("{}-bump-{}.log", name, chrono_timestamp()))
+}
+
 /// Prune old build logs, keeping at most `max_per_pkg` per package.
 pub fn prune_build_logs(max_per_pkg: usize) {
     let dir = log_dir();

@@ -90,6 +90,8 @@ fn run_tui(cfg: config::Config) -> Result<()> {
                         KeyCode::Char('j') | KeyCode::Down => {
                             if app.panel == app::PanelMode::BuildLog {
                                 app.scroll_log_down();
+                            } else if app.panel == app::PanelMode::BumpLog {
+                                app.bump_log_scroll = app.bump_log_scroll.saturating_sub(1);
                             } else {
                                 app.move_down();
                             }
@@ -97,6 +99,8 @@ fn run_tui(cfg: config::Config) -> Result<()> {
                         KeyCode::Char('k') | KeyCode::Up => {
                             if app.panel == app::PanelMode::BuildLog {
                                 app.scroll_log_up();
+                            } else if app.panel == app::PanelMode::BumpLog {
+                                app.bump_log_scroll += 1;
                             } else {
                                 app.move_up();
                             }
@@ -112,6 +116,9 @@ fn run_tui(cfg: config::Config) -> Result<()> {
                         // Build (best-effort): b = selected, B = all buildable
                         KeyCode::Char('b') => app.build_selected(),
                         KeyCode::Char('B') => app.build_all_buildable(),
+                        // Clean built packages: c = keep latest, C = remove all
+                        KeyCode::Char('c') => app.clean_old_packages(),
+                        KeyCode::Char('C') => app.clean_all_packages(),
                         // Other
                         KeyCode::Char('r') => app.refresh(),
                         KeyCode::Char('S') if !app.shlib_updates.is_empty() => {

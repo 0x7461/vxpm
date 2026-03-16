@@ -2,6 +2,7 @@ use anyhow::{bail, Context, Result};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs;
+use std::io::Write;
 use std::path::Path;
 
 pub struct BumpResult {
@@ -10,38 +11,61 @@ pub struct BumpResult {
 }
 
 /// Bump a template to a new version: rewrite version, reset revision, update checksum.
-pub fn bump_template(void_pkgs: &Path, name: &str, new_version: &str) -> Result<BumpResult> {
+/// Logs each step to the given log file path.
+pub fn bump_template(void_pkgs: &Path, name: &str, new_version: &str, log_path: &Path) -> Result<BumpResult> {
+    let mut log = fs::File::create(log_path)
+        .with_context(|| format!("creating bump log: {}", log_path.display()))?;
+
+    writeln!(log, "=> Bumping {} to v{}", name, new_version)?;
+
     let template_path = void_pkgs.join("srcpkgs").join(name).join("template");
+    writeln!(log, "=> Reading template: {}", template_path.display())?;
     let content = fs::read_to_string(&template_path)
         .with_context(|| format!("reading template: {}", template_path.display()))?;
 
     // Parse variables from template to resolve distfiles URL
     let vars = parse_template_vars(&content);
     let old_version = vars.get("version").cloned().unwrap_or_default();
+    writeln!(log, "   Current version: {}", old_version)?;
 
     // Get the raw distfiles line (with ${version} unexpanded)
     let raw_distfiles = vars.get("distfiles").cloned().unwrap_or_default();
 
     // Resolve the download URL with the new version
     let download_url = resolve_distfiles_url(&raw_distfiles, &vars, new_version);
+    writeln!(log, "=> Resolved distfiles URL:")?;
+    writeln!(log, "   {}", download_url)?;
 
     if download_url.is_empty() {
+        writeln!(log, "=> FAILED: could not resolve distfiles URL")?;
         bail!("Could not resolve distfiles URL for {}", name);
     }
 
     // Download tarball and compute SHA256
-    let new_checksum = download_and_checksum(&download_url)
-        .with_context(|| format!("downloading {}", download_url))?;
+    writeln!(log, "=> Downloading and computing SHA256...")?;
+    let _ = log.flush();
+    match download_and_checksum(&download_url) {
+        Ok(new_checksum) => {
+            writeln!(log, "   checksum={}", new_checksum)?;
 
-    // Rewrite template file line by line
-    let new_content = rewrite_template(&content, new_version, &new_checksum);
-    fs::write(&template_path, &new_content)
-        .with_context(|| format!("writing template: {}", template_path.display()))?;
+            // Rewrite template file line by line
+            writeln!(log, "=> Rewriting template: version={}, revision=1", new_version)?;
+            let new_content = rewrite_template(&content, new_version, &new_checksum);
+            fs::write(&template_path, &new_content)
+                .with_context(|| format!("writing template: {}", template_path.display()))?;
 
-    Ok(BumpResult {
-        old_version,
-        new_version: new_version.to_string(),
-    })
+            writeln!(log, "=> Done. {} {} → {}", name, old_version, new_version)?;
+
+            Ok(BumpResult {
+                old_version,
+                new_version: new_version.to_string(),
+            })
+        }
+        Err(e) => {
+            writeln!(log, "=> FAILED: {:?}", e)?;
+            Err(e.context(format!("downloading {}", download_url)))
+        }
+    }
 }
 
 /// Parse shell-style variable assignments from a template, keeping values unexpanded.
@@ -128,17 +152,25 @@ fn resolve_distfiles_url(raw: &str, vars: &HashMap<String, String>, new_version:
     url.trim().to_string()
 }
 
-/// Download a URL and return its SHA256 hex digest.
+/// Download a URL and return its SHA256 hex digest (streaming, no full buffer).
 fn download_and_checksum(url: &str) -> Result<String> {
     let client = reqwest::blocking::Client::builder()
         .user_agent("vpm/0.1")
+        .redirect(reqwest::redirect::Policy::limited(10))
+        .connect_timeout(std::time::Duration::from_secs(30))
         .build()?;
 
-    let response = client.get(url).send()?.error_for_status()?;
-    let bytes = response.bytes()?;
-
+    let mut response = client.get(url).send()?.error_for_status()?;
     let mut hasher = Sha256::new();
-    hasher.update(&bytes);
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = std::io::Read::read(&mut response, &mut buf)
+            .context("reading response body")?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
     let hash = hasher.finalize();
     Ok(format!("{:x}", hash))
 }

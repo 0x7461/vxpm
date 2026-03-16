@@ -171,6 +171,104 @@ pub fn find_built_xbps(void_pkgs: &Path, name: &str) -> Option<String> {
     best
 }
 
+/// Collect all .xbps files for a given package across binpkgs dirs.
+/// Returns Vec<(path, version_revision)> sorted oldest-first.
+fn collect_xbps_files(void_pkgs: &Path, name: &str) -> Vec<(std::path::PathBuf, String)> {
+    let dirs = [
+        void_pkgs.join("hostdir/binpkgs"),
+        void_pkgs.join("hostdir/binpkgs/custom"),
+    ];
+    let prefix = format!("{}-", name);
+    let mut files: Vec<(std::path::PathBuf, String)> = Vec::new();
+
+    for dir in &dirs {
+        let entries = match fs::read_dir(dir) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        for entry in entries.flatten() {
+            let fname = entry.file_name().to_string_lossy().to_string();
+            if !fname.starts_with(&prefix) || !fname.ends_with(".xbps") {
+                continue;
+            }
+            let after_name = &fname[prefix.len()..];
+            if !after_name.starts_with(|c: char| c.is_ascii_digit()) {
+                continue;
+            }
+            let without_xbps = after_name.strip_suffix(".xbps").unwrap_or(after_name);
+            if let Some(dot_idx) = without_xbps.rfind('.') {
+                let ver_rev = without_xbps[..dot_idx].to_string();
+                if !ver_rev.is_empty() {
+                    files.push((entry.path(), ver_rev));
+                }
+            }
+        }
+    }
+    files
+}
+
+/// Clean old built .xbps files for managed packages, keeping the latest version.
+/// Returns (files_deleted, bytes_freed).
+pub fn clean_old_packages(void_pkgs: &Path, managed_names: &[String]) -> (usize, u64) {
+    let mut deleted = 0;
+    let mut freed = 0u64;
+
+    for name in managed_names {
+        let files = collect_xbps_files(void_pkgs, name);
+        if files.len() <= 1 {
+            continue;
+        }
+        // Find the newest version
+        let best = files
+            .iter()
+            .map(|(_, v)| v.clone())
+            .reduce(|a, b| {
+                if crate::package::version_newer_pub(&b, &a) { b } else { a }
+            });
+        let best = match best {
+            Some(b) => b,
+            None => continue,
+        };
+        // Delete everything except the newest
+        for (path, ver) in &files {
+            if *ver != best {
+                if let Ok(meta) = fs::metadata(path) {
+                    freed += meta.len();
+                }
+                if fs::remove_file(path).is_ok() {
+                    // Also remove the .sig file if present
+                    let sig = path.with_extension("xbps.sig");
+                    let _ = fs::remove_file(sig);
+                    deleted += 1;
+                }
+            }
+        }
+    }
+    (deleted, freed)
+}
+
+/// Clean ALL built .xbps files for managed packages.
+/// Returns (files_deleted, bytes_freed).
+pub fn clean_all_packages(void_pkgs: &Path, managed_names: &[String]) -> (usize, u64) {
+    let mut deleted = 0;
+    let mut freed = 0u64;
+
+    for name in managed_names {
+        let files = collect_xbps_files(void_pkgs, name);
+        for (path, _) in &files {
+            if let Ok(meta) = fs::metadata(path) {
+                freed += meta.len();
+            }
+            if fs::remove_file(path).is_ok() {
+                let sig = path.with_extension("xbps.sig");
+                let _ = fs::remove_file(sig);
+                deleted += 1;
+            }
+        }
+    }
+    (deleted, freed)
+}
+
 /// Build full PackageState for all packages.
 pub fn build_package_states(void_pkgs: &Path, packages: Vec<Package>, uncommitted: &HashSet<String>) -> Vec<PackageState> {
     packages

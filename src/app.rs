@@ -16,8 +16,9 @@ use crate::template;
 use crate::version_check;
 
 pub enum TemplateBumpMsg {
-    Done(String, String, String), // (pkgname, old_version, new_version)
-    Failed(String, String),       // (pkgname, error_msg)
+    Started(std::path::PathBuf),        // log_path — sent before bump begins
+    Done(String, String, String),       // (pkgname, old_version, new_version)
+    Failed(String, String),             // (pkgname, error_msg)
     AllDone,
 }
 
@@ -32,6 +33,7 @@ pub enum PanelMode {
     None,
     Detail,
     BuildLog,
+    BumpLog,
     GitMenu,
     Help,
 }
@@ -64,6 +66,9 @@ pub struct App {
     pub pkg_last_checked: Option<u64>, // unix timestamp of last pkg upstream check
     pub template_bump_rx: Option<Receiver<TemplateBumpMsg>>,
     pub template_bumping: bool,
+    pub bump_had_failure: bool,
+    pub bump_log_path: Option<std::path::PathBuf>,
+    pub bump_log_scroll: usize,
 }
 
 /// Discover and load all packages (committed + uncommitted).
@@ -132,6 +137,9 @@ impl App {
             pkg_last_checked: version_check::last_check_time(),
             template_bump_rx: None,
             template_bumping: false,
+            bump_had_failure: false,
+            bump_log_path: None,
+            bump_log_scroll: 0,
         })
     }
 
@@ -357,16 +365,27 @@ impl App {
 
         for msg in msgs {
             match msg {
+                TemplateBumpMsg::Started(path) => {
+                    self.bump_log_path = Some(path);
+                    self.bump_log_scroll = 0;
+                }
                 TemplateBumpMsg::Done(name, old, new) => {
                     self.status_msg = Some(format!("Bumped {} {} → {}", name, old, new));
                 }
                 TemplateBumpMsg::Failed(name, err) => {
                     self.status_msg = Some(format!("Bump failed for {}: {}", name, err));
+                    self.bump_had_failure = true;
                 }
                 TemplateBumpMsg::AllDone => {
                     self.template_bumping = false;
                     self.template_bump_rx = None;
+                    let preserve_msg = self.bump_had_failure;
+                    self.bump_had_failure = false;
+                    let saved = self.status_msg.clone();
                     self.refresh();
+                    if preserve_msg {
+                        self.status_msg = saved;
+                    }
                     return;
                 }
             }
@@ -398,8 +417,11 @@ impl App {
         let void_pkgs = self.void_pkgs.clone();
         let (tx, rx) = std::sync::mpsc::channel();
         self.template_bump_rx = Some(rx);
+        self.panel = PanelMode::BumpLog;
         std::thread::spawn(move || {
-            match template::bump_template(&void_pkgs, &name, &latest) {
+            let log_path = build::bump_log_path(&name);
+            let _ = tx.send(TemplateBumpMsg::Started(log_path.clone()));
+            match template::bump_template(&void_pkgs, &name, &latest, &log_path) {
                 Ok(result) => {
                     let _ = tx.send(TemplateBumpMsg::Done(name, result.old_version, result.new_version));
                 }
@@ -432,9 +454,12 @@ impl App {
         let void_pkgs = self.void_pkgs.clone();
         let (tx, rx) = std::sync::mpsc::channel();
         self.template_bump_rx = Some(rx);
+        self.panel = PanelMode::BumpLog;
         std::thread::spawn(move || {
             for (name, latest) in targets {
-                match template::bump_template(&void_pkgs, &name, &latest) {
+                let log_path = build::bump_log_path(&name);
+                let _ = tx.send(TemplateBumpMsg::Started(log_path.clone()));
+                match template::bump_template(&void_pkgs, &name, &latest, &log_path) {
                     Ok(result) => {
                         let _ = tx.send(TemplateBumpMsg::Done(
                             name,
@@ -449,6 +474,34 @@ impl App {
             }
             let _ = tx.send(TemplateBumpMsg::AllDone);
         });
+    }
+
+    /// Clean old built packages, keeping only the latest version per package.
+    pub fn clean_old_packages(&mut self) {
+        let names: Vec<String> = self.packages.iter().map(|p| p.package.name.clone()).collect();
+        let (deleted, freed) = repo::clean_old_packages(&self.void_pkgs, &names);
+        self.refresh();
+        if deleted > 0 {
+            self.status_msg = Some(format!(
+                "Cleaned {} old package(s), freed {}", deleted, format_bytes(freed)
+            ));
+        } else {
+            self.status_msg = Some("Nothing to clean — already at one version per package".to_string());
+        }
+    }
+
+    /// Clean ALL built packages for managed packages.
+    pub fn clean_all_packages(&mut self) {
+        let names: Vec<String> = self.packages.iter().map(|p| p.package.name.clone()).collect();
+        let (deleted, freed) = repo::clean_all_packages(&self.void_pkgs, &names);
+        self.refresh();
+        if deleted > 0 {
+            self.status_msg = Some(format!(
+                "Removed {} package(s), freed {}", deleted, format_bytes(freed)
+            ));
+        } else {
+            self.status_msg = Some("No built packages to remove".to_string());
+        }
     }
 
     /// Build the poll queue for messages from the background thread.
@@ -813,4 +866,16 @@ pub struct StatusCounts {
     pub build_outdated: usize,
     pub ready_to_install: usize,
     pub build_failed: usize,
+}
+
+fn format_bytes(bytes: u64) -> String {
+    if bytes >= 1_073_741_824 {
+        format!("{:.1} GB", bytes as f64 / 1_073_741_824.0)
+    } else if bytes >= 1_048_576 {
+        format!("{:.1} MB", bytes as f64 / 1_048_576.0)
+    } else if bytes >= 1024 {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{} B", bytes)
+    }
 }

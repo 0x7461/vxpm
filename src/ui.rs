@@ -56,8 +56,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         PanelMode::None => 0,
         PanelMode::Detail => 10,
         PanelMode::BuildLog => 12,
+        PanelMode::BumpLog => 12,
         PanelMode::GitMenu => 10,
-        PanelMode::Help => 14,
+        PanelMode::Help => 16,
     };
 
     let chunks = if panel_height > 0 {
@@ -96,6 +97,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         match app.panel {
             PanelMode::Detail => draw_detail(f, app, chunks[2]),
             PanelMode::BuildLog => draw_build_log(f, app, chunks[2]),
+            PanelMode::BumpLog => draw_bump_log(f, app, chunks[2]),
             PanelMode::GitMenu => draw_git_panel(f, app, chunks[2]),
             PanelMode::Help => draw_help_panel(f, chunks[2]),
             PanelMode::None => {}
@@ -589,6 +591,44 @@ fn draw_build_log(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(para, area);
 }
 
+fn draw_bump_log(f: &mut Frame, app: &App, area: Rect) {
+    let mut lines: Vec<Line<'static>> = Vec::new();
+
+    // Read log file content
+    let output: Vec<String> = if let Some(ref path) = app.bump_log_path {
+        std::fs::read_to_string(path)
+            .unwrap_or_default()
+            .lines()
+            .map(String::from)
+            .collect()
+    } else {
+        vec!["Waiting for bump to start...".to_string()]
+    };
+
+    let available = area.height.saturating_sub(2) as usize; // borders
+    let tail = output.len().saturating_sub(app.bump_log_scroll);
+    let start = tail.saturating_sub(available);
+    for line_text in &output[start..tail] {
+        let color = if line_text.starts_with("=> FAILED") { RED } else { TEXT };
+        lines.push(Line::from(Span::styled(
+            format!("  {}", line_text),
+            Style::default().fg(color),
+        )));
+    }
+
+    let title = if app.template_bumping { " Bump Log (in progress) " } else { " Bump Log " };
+    let para = Paragraph::new(lines).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(SURFACE0))
+            .title(Span::styled(
+                title,
+                Style::default().fg(TEAL).add_modifier(Modifier::BOLD),
+            )),
+    );
+    f.render_widget(para, area);
+}
+
 fn draw_git_panel(f: &mut Frame, app: &App, area: Rect) {
     let mut lines: Vec<Line<'static>> = Vec::new();
 
@@ -703,6 +743,8 @@ fn draw_help_panel(f: &mut Frame, area: Rect) {
         kb("T", "Bump template to upstream (all)"),
         kb("b", "Build selected package"),
         kb("B", "Build all buildable packages"),
+        kb("c", "Clean old built packages (keep latest)"),
+        kb("C", "Clean all built packages"),
         sep(),
         kb("g", "Git operations panel  (1: sync  2: rebase  3: push)"),
         kb("S", "Apply pending shlib updates"),
@@ -772,7 +814,7 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
         ));
     }
 
-    const KEYBINDS: &str = "j/k:nav  /:search  Tab:tree  u/U:check  t/T:bump  b/B:build  g:git  ?:help  q:quit";
+    const KEYBINDS: &str = "j/k:nav  /:search  Tab:tree  u/U:check  t/T:bump  b/B:build  c/C:clean  g:git  ?:help  q:quit";
 
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
