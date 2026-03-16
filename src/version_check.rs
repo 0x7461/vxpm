@@ -184,8 +184,8 @@ pub fn last_check_time() -> Option<u64> {
 }
 
 pub enum VersionMsg {
-    Found(String, String), // (name, version)
-    Done(usize, bool),     // (packages attempted, rate_limited)
+    Found(String, String, Option<u64>), // (name, version, cache_age_secs if from cache)
+    Done(usize, bool),                  // (packages attempted, rate_limited)
 }
 
 /// Check all packages for upstream versions, sending results incrementally.
@@ -206,7 +206,8 @@ pub fn check_all_versions_streaming(
         if !force {
             if let Some(entry) = cache.entries.get(&pkg.name) {
                 if now - entry.timestamp < CACHE_TTL_SECS {
-                    let _ = tx.send(VersionMsg::Found(pkg.name.clone(), entry.version.clone()));
+                    let age = now - entry.timestamp;
+                    let _ = tx.send(VersionMsg::Found(pkg.name.clone(), entry.version.clone(), Some(age)));
                     continue;
                 }
             }
@@ -235,7 +236,7 @@ pub fn check_all_versions_streaming(
                     timestamp: now,
                 },
             );
-            let _ = tx.send(VersionMsg::Found(pkg.name.clone(), ver));
+            let _ = tx.send(VersionMsg::Found(pkg.name.clone(), ver, None));
         }
     }
 

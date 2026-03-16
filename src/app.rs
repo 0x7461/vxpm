@@ -287,11 +287,11 @@ impl App {
         let (tx, rx) = std::sync::mpsc::channel();
         self.version_check_rx = Some(rx);
         std::thread::spawn(move || {
-            version_check::check_all_versions_streaming(&void_pkgs, &[pkg], false, tx);
+            version_check::check_all_versions_streaming(&void_pkgs, &[pkg], true, tx);
         });
     }
 
-    /// Check upstream versions for all packages.
+    /// Check upstream versions for all packages (respects cache TTL).
     pub fn check_versions(&mut self) {
         if self.checking_versions {
             return;
@@ -319,7 +319,7 @@ impl App {
 
         for msg in msgs {
             match msg {
-                version_check::VersionMsg::Found(name, ver) => {
+                version_check::VersionMsg::Found(name, ver, cache_age) => {
                     for state in &mut self.packages {
                         if state.package.name == name {
                             state.latest = Some(ver.clone());
@@ -331,7 +331,10 @@ impl App {
                             );
                         }
                     }
-                    self.status_msg = Some(format!("Checked {}...", name));
+                    self.status_msg = Some(match cache_age {
+                        Some(age) => format!("Checked {} (cached {}m ago)", name, age / 60),
+                        None => format!("Checked {}", name),
+                    });
                 }
                 version_check::VersionMsg::Done(count, rate_limited) => {
                     self.checking_versions = false;
