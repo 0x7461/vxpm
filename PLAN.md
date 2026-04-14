@@ -200,7 +200,7 @@ src/
 
 ### Keybinds (complete, as of Phase 6)
 
-`j/k` nav, `Tab` tree view, `/` search, `Enter` detail, `u` check upstream (selected), `U` check upstream (all), `t` bump template (selected, async), `T` bump template (all, async), `b` build selected (best-effort), `B` build all buildable (BuildOutdated+BuildFailed, topo), `S` apply shlib updates, `g` git menu, `?` help panel, `r` refresh, `Esc` back/cancel, `q`/`Ctrl+C` quit
+`j/k` nav, `Tab` tree view, `/` search, `Enter` detail, `u` check upstream (selected, always fresh), `U` check upstream (all, cached 1hr), `t` bump template (selected, async), `T` bump template (all, async), `b` build selected (best-effort), `B` build all buildable (BuildOutdated+BuildFailed, topo), `c` clean old built packages (keep latest), `C` clean all built packages, `S` apply shlib updates, `g` git menu, `?` help panel, `r` refresh, `Esc` back/cancel, `q`/`Ctrl+C` quit
 
 ---
 
@@ -244,3 +244,9 @@ src/
 - **Header staleness hints**: dropped keybind hints from header (covered by `?` panel). Header shows void fetch age and pkg check info. Pkg check: `"N unchecked (last: YYYY-MM-DD HH:MM)"` or `"last YYYY-MM-DD HH:MM"` — uses exact local timestamp via chrono.
 - **pkg_last_checked TTL trap**: `last_check_time()` reads disk cache. If version check hits TTL (< 1h), no disk timestamps are updated → `last_check_time()` returns same old value → header appears unchanged. Fix: set `pkg_last_checked = SystemTime::now()` directly in `poll_version_check` Done handler, not from cache.
 - **last_check_time() = min not max**: represents the oldest checked package (staleness floor). But since we now set `pkg_last_checked` from wall clock on Done, `last_check_time()` is only used at startup to restore the previous session's value.
+- **Bump log panel**: `t`/`T` opens a live log panel that reads the log file each frame. Logs each step (URL resolution, download, checksum). Stored at `~/.cache/vpm/logs/<pkg>-bump-<timestamp>.log`.
+- **Status bar race on refresh**: `refresh()` unconditionally sets `status_msg = "Refreshed"`, clobbering prior messages. Fix: call `refresh()` first, then set the real message after. For bump failures, save the failure message and restore it after AllDone triggers refresh.
+- **Streaming download for checksums**: large tarballs (e.g. ollama ~1.9GB) should be hashed in streaming 64KB chunks instead of buffered entirely with `.bytes()`. Not an OOM issue with 32GB RAM, but avoids timeout/error-handling problems with large responses.
+- **Version cache confuses users**: `u` (single) was using cached results — users expect a fresh check when they explicitly press it. Fix: `u` always bypasses cache (`force: true`), `U` respects 1hr TTL. Show "(cached Xm ago)" in status bar for cached results.
+
+Updated: 2026-03-17
