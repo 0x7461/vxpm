@@ -1,6 +1,8 @@
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
+use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
 #[derive(Debug, Clone)]
@@ -18,7 +20,7 @@ pub enum GitMsg {
     Done,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum GitOp {
     SyncMaster,
     RebaseCustom,
@@ -62,24 +64,24 @@ pub fn get_git_status(void_pkgs: &Path) -> Option<GitStatus> {
     })
 }
 
-pub fn run_git_op(void_pkgs: PathBuf, op: GitOp, tx: Sender<GitMsg>) {
+pub fn run_git_op(
+    void_pkgs: PathBuf,
+    op: GitOp,
+    tx: Sender<GitMsg>,
+    cancel: Arc<AtomicBool>,
+    current_child: Arc<Mutex<Option<Child>>>,
+) {
     match op {
         GitOp::SyncMaster => {
             let _ = tx.send(GitMsg::Output("Fetching void/master...".into()));
-            if !run_streaming(&void_pkgs, &["fetch", "void", "master"], &tx) {
+            if !run_streaming(&void_pkgs, &["fetch", "void", "master"], &tx, &cancel, &current_child) {
                 let _ = tx.send(GitMsg::Failed("fetch failed".into()));
                 let _ = tx.send(GitMsg::Done);
                 return;
             }
-            let _ = tx.send(GitMsg::Output(
-                "Updating master ref to void/master...".into(),
-            ));
+            let _ = tx.send(GitMsg::Output("Updating master ref to void/master...".into()));
             let out = Command::new("git")
-                .args([
-                    "update-ref",
-                    "refs/heads/master",
-                    "refs/remotes/void/master",
-                ])
+                .args(["update-ref", "refs/heads/master", "refs/remotes/void/master"])
                 .current_dir(&void_pkgs)
                 .output();
             match out {
@@ -94,13 +96,26 @@ pub fn run_git_op(void_pkgs: PathBuf, op: GitOp, tx: Sender<GitMsg>) {
         }
         GitOp::RebaseCustom => {
             let _ = tx.send(GitMsg::Output("Rebasing custom onto master...".into()));
-            if !run_streaming(&void_pkgs, &["rebase", "master"], &tx) {
-                let _ = tx.send(GitMsg::Output("Rebase failed, aborting...".into()));
-                let _ = Command::new("git")
-                    .args(["rebase", "--abort"])
-                    .current_dir(&void_pkgs)
-                    .output();
-                let _ = tx.send(GitMsg::Failed("Rebase failed (aborted)".into()));
+            let ok = run_streaming(&void_pkgs, &["rebase", "master"], &tx, &cancel, &current_child);
+            if !ok {
+                let aborted = if cancel.load(Ordering::SeqCst) {
+                    let _ = tx.send(GitMsg::Output("Rebase cancelled, aborting...".into()));
+                    true
+                } else {
+                    let _ = tx.send(GitMsg::Output("Rebase failed, aborting...".into()));
+                    true
+                };
+                if aborted {
+                    let _ = Command::new("git")
+                        .args(["rebase", "--abort"])
+                        .current_dir(&void_pkgs)
+                        .output();
+                }
+                let _ = tx.send(GitMsg::Failed(if cancel.load(Ordering::SeqCst) {
+                    "Rebase cancelled (aborted)".into()
+                } else {
+                    "Rebase failed (aborted)".into()
+                }));
                 let _ = tx.send(GitMsg::Done);
                 return;
             }
@@ -113,6 +128,8 @@ pub fn run_git_op(void_pkgs: PathBuf, op: GitOp, tx: Sender<GitMsg>) {
                 &void_pkgs,
                 &["push", "origin", "custom", "--force-with-lease"],
                 &tx,
+                &cancel,
+                &current_child,
             ) {
                 let _ = tx.send(GitMsg::Failed("Push failed".into()));
                 let _ = tx.send(GitMsg::Done);
@@ -125,9 +142,14 @@ pub fn run_git_op(void_pkgs: PathBuf, op: GitOp, tx: Sender<GitMsg>) {
 }
 
 /// Run a git command, streaming stdout+stderr line by line. Returns true if exit code == 0.
-fn run_streaming(void_pkgs: &Path, args: &[&str], tx: &Sender<GitMsg>) -> bool {
+fn run_streaming(
+    void_pkgs: &Path,
+    args: &[&str],
+    tx: &Sender<GitMsg>,
+    cancel: &Arc<AtomicBool>,
+    current_child: &Arc<Mutex<Option<Child>>>,
+) -> bool {
     use std::io::{BufRead, BufReader};
-    use std::process::Stdio;
 
     let mut child = match Command::new("git")
         .args(args)
@@ -143,14 +165,27 @@ fn run_streaming(void_pkgs: &Path, args: &[&str], tx: &Sender<GitMsg>) -> bool {
         }
     };
 
-    // Read stdout in a thread
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
+    // Store child so main thread can kill it
+    *current_child.lock().unwrap() = Some(child);
+
     let tx2 = tx.clone();
+    let cancel2 = cancel.clone();
+    let child_store2 = current_child.clone();
 
     let stdout_handle = std::thread::spawn(move || {
         if let Some(out) = stdout {
             for line in BufReader::new(out).lines().map_while(Result::ok) {
+                if cancel2.load(Ordering::SeqCst) {
+                    // Kill child immediately when cancelled
+                    if let Ok(mut guard) = child_store2.lock() {
+                        if let Some(ref mut c) = *guard {
+                            let _ = c.kill();
+                        }
+                    }
+                    break;
+                }
                 let _ = tx2.send(GitMsg::Output(line));
             }
         }
@@ -163,5 +198,16 @@ fn run_streaming(void_pkgs: &Path, args: &[&str], tx: &Sender<GitMsg>) -> bool {
     }
 
     let _ = stdout_handle.join();
-    matches!(child.wait(), Ok(status) if status.success())
+
+    // Wait for child and clear store
+    let success = {
+        let mut guard = current_child.lock().unwrap();
+        match guard.as_mut() {
+            Some(c) => matches!(c.wait(), Ok(s) if s.success()),
+            None => false,
+        }
+    };
+    *current_child.lock().unwrap() = None;
+
+    success
 }

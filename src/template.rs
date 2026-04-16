@@ -4,6 +4,8 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 pub struct BumpResult {
     pub old_version: String,
@@ -12,7 +14,7 @@ pub struct BumpResult {
 
 /// Bump a template to a new version: rewrite version, reset revision, update checksum.
 /// Logs each step to the given log file path.
-pub fn bump_template(void_pkgs: &Path, name: &str, new_version: &str, log_path: &Path) -> Result<BumpResult> {
+pub fn bump_template(void_pkgs: &Path, name: &str, new_version: &str, log_path: &Path, cancel: Arc<AtomicBool>) -> Result<BumpResult> {
     let mut log = fs::File::create(log_path)
         .with_context(|| format!("creating bump log: {}", log_path.display()))?;
 
@@ -41,10 +43,11 @@ pub fn bump_template(void_pkgs: &Path, name: &str, new_version: &str, log_path: 
         bail!("Could not resolve distfiles URL for {}", name);
     }
 
-    // Download tarball and compute SHA256
+    // Download tarball and compute SHA256 (also caches to hostdir/sources/ for xbps-src)
+    let sources_dir = void_pkgs.join("hostdir").join("sources");
     writeln!(log, "=> Downloading and computing SHA256...")?;
     let _ = log.flush();
-    match download_and_checksum(&download_url) {
+    match download_and_checksum(&download_url, &sources_dir, &cancel) {
         Ok(new_checksum) => {
             writeln!(log, "   checksum={}", new_checksum)?;
 
@@ -152,25 +155,61 @@ fn resolve_distfiles_url(raw: &str, vars: &HashMap<String, String>, new_version:
     url.trim().to_string()
 }
 
-/// Download a URL and return its SHA256 hex digest (streaming, no full buffer).
-fn download_and_checksum(url: &str) -> Result<String> {
+/// Download a URL, stream to sources_dir for xbps-src caching, and return its SHA256 hex digest.
+fn download_and_checksum(url: &str, sources_dir: &Path, cancel: &Arc<AtomicBool>) -> Result<String> {
     let client = reqwest::blocking::Client::builder()
         .user_agent("vpm/0.1")
         .redirect(reqwest::redirect::Policy::limited(10))
         .connect_timeout(std::time::Duration::from_secs(30))
         .build()?;
 
+    // Derive filename from URL for xbps-src source cache
+    let raw_filename = url.split('/').last().unwrap_or("download");
+    let filename = raw_filename.split('?').next().unwrap_or(raw_filename);
+    fs::create_dir_all(sources_dir)
+        .with_context(|| format!("creating sources dir: {}", sources_dir.display()))?;
+    let final_path = sources_dir.join(filename);
+    let tmp_path = sources_dir.join(format!("{}.tmp", filename));
+
+    // Reuse cached file if already present (avoids re-downloading after xbps-src or manual dl)
+    if final_path.exists() {
+        let mut f = fs::File::open(&final_path)
+            .with_context(|| format!("opening cached file: {}", final_path.display()))?;
+        let mut hasher = Sha256::new();
+        let mut buf = [0u8; 64 * 1024];
+        loop {
+            let n = std::io::Read::read(&mut f, &mut buf).context("hashing cached file")?;
+            if n == 0 { break; }
+            hasher.update(&buf[..n]);
+        }
+        return Ok(format!("{:x}", hasher.finalize()));
+    }
+
     let mut response = client.get(url).send()?.error_for_status()?;
     let mut hasher = Sha256::new();
     let mut buf = [0u8; 64 * 1024];
-    loop {
-        let n = std::io::Read::read(&mut response, &mut buf)
-            .context("reading response body")?;
-        if n == 0 {
-            break;
+    {
+        let mut tmp_file = fs::File::create(&tmp_path)
+            .with_context(|| format!("creating temp file: {}", tmp_path.display()))?;
+        loop {
+            if cancel.load(Ordering::SeqCst) {
+                drop(tmp_file);
+                let _ = fs::remove_file(&tmp_path);
+                bail!("cancelled");
+            }
+            let n = std::io::Read::read(&mut response, &mut buf)
+                .context("reading response body")?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+            tmp_file.write_all(&buf[..n])
+                .context("writing to temp file")?;
         }
-        hasher.update(&buf[..n]);
     }
+    fs::rename(&tmp_path, &final_path)
+        .with_context(|| format!("moving to source cache: {}", final_path.display()))?;
+
     let hash = hasher.finalize();
     Ok(format!("{:x}", hash))
 }

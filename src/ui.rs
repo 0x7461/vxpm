@@ -3,7 +3,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState, Wrap},
+    widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, TableState, Wrap},
     Frame,
 };
 
@@ -106,6 +106,27 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     } else {
         draw_status_bar(f, app, chunks[chunks.len() - 1]);
     }
+
+    // Confirmation modals — rendered last so they float above everything
+    if let Some(ref op) = app.cancel_confirm {
+        let msg = format!("Cancel {} in progress?  y = yes   Esc = no", op);
+        draw_modal(f, &msg, RED);
+    } else if app.quit_confirm {
+        draw_modal(f, "Quit while operation is running?  y = yes   Esc = no", YELLOW);
+    }
+}
+
+fn draw_modal(f: &mut Frame, text: &str, border_color: Color) {
+    let width = (text.len() as u16 + 4).min(f.area().width.saturating_sub(4));
+    let area = f.area();
+    let x = area.width.saturating_sub(width) / 2;
+    let y = area.height.saturating_sub(3) / 2;
+    let popup = Rect { x, y, width, height: 3 };
+    f.render_widget(Clear, popup);
+    let para = Paragraph::new(text)
+        .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(border_color)))
+        .style(Style::default().fg(TEXT));
+    f.render_widget(para, popup);
 }
 
 fn draw_header(f: &mut Frame, app: &App, area: Rect, visible_len: usize) {

@@ -1,14 +1,14 @@
 use std::path::PathBuf;
-use std::sync::atomic::Ordering;
+use std::process::Child;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::sync::mpsc::Receiver;
-use std::time::Instant;
-
 use ratatui::widgets::TableState;
 
 use crate::build::{self, BuildHistory, BuildJob, BuildJobStatus, BuildMsg, BuildQueue};
 use crate::dep_graph::DepGraph;
 use crate::gcc::GccInfo;
-use crate::git::{self, GitMsg, GitStatus};
+use crate::git::{self, GitMsg, GitOp, GitStatus};
 use crate::package::{Package, PackageState, Status};
 use crate::repo;
 use crate::shlibs::{self, ShlibMap};
@@ -50,12 +50,14 @@ pub struct App {
     pub should_quit: bool,
     pub build_queue: BuildQueue,
     pub build_history: BuildHistory,
-    pub cancel_pending: Option<Instant>,
     pub version_check_rx: Option<Receiver<version_check::VersionMsg>>,
     pub git_status: Option<GitStatus>,
     pub git_op_rx: Option<Receiver<GitMsg>>,
     pub git_output: Vec<String>,
     pub git_op_active: bool,
+    pub git_cancel_flag: Arc<AtomicBool>,
+    pub git_current_child: Arc<Mutex<Option<Child>>>,
+    pub git_current_op: Option<GitOp>,
     pub table_state: TableState,
     pub filter: String,
     pub filter_active: bool,
@@ -66,9 +68,12 @@ pub struct App {
     pub pkg_last_checked: Option<u64>, // unix timestamp of last pkg upstream check
     pub template_bump_rx: Option<Receiver<TemplateBumpMsg>>,
     pub template_bumping: bool,
+    pub bump_cancel_flag: Arc<AtomicBool>,
     pub bump_had_failure: bool,
     pub bump_log_path: Option<std::path::PathBuf>,
     pub bump_log_scroll: usize,
+    pub cancel_confirm: Option<String>, // op name being cancelled ("build"/"bump"/"git")
+    pub quit_confirm: bool,
 }
 
 /// Discover and load all packages (committed + uncommitted).
@@ -121,12 +126,14 @@ impl App {
             should_quit: false,
             build_queue: BuildQueue::new(),
             build_history: BuildHistory::load(),
-            cancel_pending: None,
             version_check_rx: None,
             git_status,
             git_op_rx: None,
             git_output: Vec::new(),
             git_op_active: false,
+            git_cancel_flag: Arc::new(AtomicBool::new(false)),
+            git_current_child: Arc::new(Mutex::new(None)),
+            git_current_op: None,
             table_state: TableState::default(),
             filter: String::new(),
             filter_active: false,
@@ -137,9 +144,12 @@ impl App {
             pkg_last_checked: version_check::last_check_time(),
             template_bump_rx: None,
             template_bumping: false,
+            bump_cancel_flag: Arc::new(AtomicBool::new(false)),
             bump_had_failure: false,
             bump_log_path: None,
             bump_log_scroll: 0,
+            cancel_confirm: None,
+            quit_confirm: false,
         })
     }
 
@@ -416,15 +426,17 @@ impl App {
             None => return,
         };
         self.template_bumping = true;
+        self.bump_cancel_flag.store(false, Ordering::SeqCst);
         self.status_msg = Some(format!("Bumping {} to v{}...", name, latest));
         let void_pkgs = self.void_pkgs.clone();
+        let cancel = self.bump_cancel_flag.clone();
         let (tx, rx) = std::sync::mpsc::channel();
         self.template_bump_rx = Some(rx);
         self.panel = PanelMode::BumpLog;
         std::thread::spawn(move || {
             let log_path = build::bump_log_path(&name);
             let _ = tx.send(TemplateBumpMsg::Started(log_path.clone()));
-            match template::bump_template(&void_pkgs, &name, &latest, &log_path) {
+            match template::bump_template(&void_pkgs, &name, &latest, &log_path, cancel) {
                 Ok(result) => {
                     let _ = tx.send(TemplateBumpMsg::Done(name, result.old_version, result.new_version));
                 }
@@ -453,16 +465,21 @@ impl App {
             return;
         }
         self.template_bumping = true;
+        self.bump_cancel_flag.store(false, Ordering::SeqCst);
         self.status_msg = Some(format!("Bumping {} packages...", targets.len()));
         let void_pkgs = self.void_pkgs.clone();
+        let cancel = self.bump_cancel_flag.clone();
         let (tx, rx) = std::sync::mpsc::channel();
         self.template_bump_rx = Some(rx);
         self.panel = PanelMode::BumpLog;
         std::thread::spawn(move || {
             for (name, latest) in targets {
+                if cancel.load(Ordering::SeqCst) {
+                    break;
+                }
                 let log_path = build::bump_log_path(&name);
                 let _ = tx.send(TemplateBumpMsg::Started(log_path.clone()));
-                match template::bump_template(&void_pkgs, &name, &latest, &log_path) {
+                match template::bump_template(&void_pkgs, &name, &latest, &log_path, cancel.clone()) {
                     Ok(result) => {
                         let _ = tx.send(TemplateBumpMsg::Done(
                             name,
@@ -472,6 +489,9 @@ impl App {
                     }
                     Err(e) => {
                         let _ = tx.send(TemplateBumpMsg::Failed(name, e.to_string()));
+                        if cancel.load(Ordering::SeqCst) {
+                            break;
+                        }
                     }
                 }
             }
@@ -738,26 +758,96 @@ impl App {
         }
     }
 
-    /// Handle cancel build: double-Esc within 2 seconds.
-    pub fn cancel_build(&mut self) {
-        if !self.build_queue.active {
-            return;
-        }
+    pub fn any_op_active(&self) -> bool {
+        self.build_queue.active || self.template_bumping || self.git_op_active
+    }
 
-        if let Some(first_press) = self.cancel_pending {
-            if first_press.elapsed().as_secs() < 2 {
-                // Second press within 2s — cancel
-                self.build_queue.cancel_flag.store(true, Ordering::SeqCst);
-                self.cancel_pending = None;
-                self.status_msg = Some("Cancelling build...".to_string());
-            } else {
-                // Expired — treat as first press again
-                self.cancel_pending = Some(Instant::now());
-                self.status_msg = Some("Press Esc again to cancel build".to_string());
-            }
+    /// Show cancel confirmation for the active operation.
+    pub fn request_cancel(&mut self) {
+        let op = if self.build_queue.active {
+            "build"
+        } else if self.template_bumping {
+            "bump"
+        } else if self.git_op_active {
+            "git"
         } else {
-            self.cancel_pending = Some(Instant::now());
-            self.status_msg = Some("Press Esc again to cancel build".to_string());
+            return;
+        };
+        self.cancel_confirm = Some(op.to_string());
+    }
+
+    /// Actually cancel the confirmed operation.
+    pub fn confirm_cancel(&mut self) {
+        match self.cancel_confirm.as_deref() {
+            Some("build") => {
+                self.build_queue.cancel_flag.store(true, Ordering::SeqCst);
+                self.build_queue.kill_current();
+                self.status_msg = Some("Cancelling build...".to_string());
+            }
+            Some("bump") => {
+                self.bump_cancel_flag.store(true, Ordering::SeqCst);
+                self.status_msg = Some("Cancelling bump...".to_string());
+            }
+            Some("git") => {
+                self.git_cancel_flag.store(true, Ordering::SeqCst);
+                if let Ok(mut guard) = self.git_current_child.lock() {
+                    if let Some(ref mut c) = *guard {
+                        let _ = c.kill();
+                    }
+                }
+                self.status_msg = Some("Cancelling git operation...".to_string());
+            }
+            _ => {}
+        }
+        self.cancel_confirm = None;
+    }
+
+    pub fn deny_cancel(&mut self) {
+        self.cancel_confirm = None;
+    }
+
+    /// Show quit confirmation if any op is running, otherwise quit immediately.
+    pub fn request_quit(&mut self) {
+        if self.any_op_active() {
+            self.quit_confirm = true;
+        } else {
+            self.should_quit = true;
+        }
+    }
+
+    /// Kill all ops and quit.
+    pub fn confirm_quit(&mut self) {
+        self.kill_all();
+        self.should_quit = true;
+    }
+
+    pub fn deny_quit(&mut self) {
+        self.quit_confirm = false;
+    }
+
+    /// Kill all active operations immediately.
+    pub fn kill_all(&mut self) {
+        if self.build_queue.active {
+            self.build_queue.cancel_flag.store(true, Ordering::SeqCst);
+            self.build_queue.kill_current();
+        }
+        if self.template_bumping {
+            self.bump_cancel_flag.store(true, Ordering::SeqCst);
+        }
+        if self.git_op_active {
+            self.git_cancel_flag.store(true, Ordering::SeqCst);
+            if let Ok(mut guard) = self.git_current_child.lock() {
+                if let Some(ref mut c) = *guard {
+                    let _ = c.kill();
+                }
+            }
+            // Run rebase --abort if that was the active git op
+            if self.git_current_op == Some(GitOp::RebaseCustom) {
+                let _ = std::process::Command::new("git")
+                    .args(["rebase", "--abort"])
+                    .current_dir(&self.void_pkgs)
+                    .output();
+            }
         }
     }
 
@@ -775,31 +865,35 @@ impl App {
         };
     }
 
-    fn start_git_op(&mut self, op: git::GitOp) {
+    fn start_git_op(&mut self, op: GitOp) {
         if self.git_op_active {
             self.status_msg = Some("Git operation already in progress".to_string());
             return;
         }
         self.git_op_active = true;
+        self.git_current_op = Some(op);
+        self.git_cancel_flag.store(false, Ordering::SeqCst);
         self.git_output.clear();
         let void_pkgs = self.void_pkgs.clone();
+        let cancel = self.git_cancel_flag.clone();
+        let current_child = self.git_current_child.clone();
         let (tx, rx) = std::sync::mpsc::channel();
         self.git_op_rx = Some(rx);
         std::thread::spawn(move || {
-            git::run_git_op(void_pkgs, op, tx);
+            git::run_git_op(void_pkgs, op, tx, cancel, current_child);
         });
     }
 
     pub fn git_sync_master(&mut self) {
-        self.start_git_op(git::GitOp::SyncMaster);
+        self.start_git_op(GitOp::SyncMaster);
     }
 
     pub fn git_rebase_custom(&mut self) {
-        self.start_git_op(git::GitOp::RebaseCustom);
+        self.start_git_op(GitOp::RebaseCustom);
     }
 
     pub fn git_push_custom(&mut self) {
-        self.start_git_op(git::GitOp::PushCustom);
+        self.start_git_op(GitOp::PushCustom);
     }
 
     pub fn poll_git(&mut self) {
@@ -824,6 +918,7 @@ impl App {
                 }
                 GitMsg::Done => {
                     self.git_op_active = false;
+                    self.git_current_op = None;
                     self.git_op_rx = None;
                     self.refresh_git_status();
                     return;

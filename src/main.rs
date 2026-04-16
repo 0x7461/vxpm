@@ -72,7 +72,12 @@ fn run_tui(cfg: config::Config) -> Result<()> {
                 // Ctrl+C always quits
                 if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c')
                 {
-                    break;
+                    app.request_quit();
+                    if !app.should_quit {
+                        // quit_confirm was set — keep running until user answers
+                    } else {
+                        break;
+                    }
                 }
 
                 if app.filter_active {
@@ -85,7 +90,9 @@ fn run_tui(cfg: config::Config) -> Result<()> {
                     }
                 } else {
                     match key.code {
-                        KeyCode::Char('q') => break,
+                        KeyCode::Char('q') => app.request_quit(),
+                        KeyCode::Char('y') if app.cancel_confirm.is_some() => app.confirm_cancel(),
+                        KeyCode::Char('y') if app.quit_confirm => app.confirm_quit(),
                         KeyCode::Char('/') => app.start_filter(),
                         KeyCode::Char('j') | KeyCode::Down => {
                             if app.panel == app::PanelMode::BuildLog {
@@ -142,8 +149,12 @@ fn run_tui(cfg: config::Config) -> Result<()> {
                             app.git_push_custom();
                         }
                         KeyCode::Esc => {
-                            if app.build_queue.active {
-                                app.cancel_build();
+                            if app.cancel_confirm.is_some() {
+                                app.deny_cancel();
+                            } else if app.quit_confirm {
+                                app.deny_quit();
+                            } else if app.any_op_active() {
+                                app.request_cancel();
                             } else if !app.filter.is_empty() {
                                 app.filter.clear();
                                 app.selected = 0;

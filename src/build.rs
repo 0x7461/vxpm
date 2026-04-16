@@ -2,10 +2,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -177,6 +177,7 @@ pub struct BuildQueue {
     pub receiver: Option<Receiver<BuildMsg>>,
     pub active: bool,
     pub cancel_flag: Arc<AtomicBool>,
+    pub current_child: Arc<Mutex<Option<Child>>>,
 }
 
 impl BuildQueue {
@@ -187,6 +188,15 @@ impl BuildQueue {
             receiver: None,
             active: false,
             cancel_flag: Arc::new(AtomicBool::new(false)),
+            current_child: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    pub fn kill_current(&self) {
+        if let Ok(mut guard) = self.current_child.lock() {
+            if let Some(ref mut child) = *guard {
+                let _ = child.kill();
+            }
         }
     }
 
@@ -205,14 +215,15 @@ impl BuildQueue {
 
         let names: Vec<String> = self.jobs.iter().map(|j| j.name.clone()).collect();
         let cancel = self.cancel_flag.clone();
+        let current_child = self.current_child.clone();
 
         std::thread::spawn(move || {
-            run_build_queue(void_pkgs, names, tx, cancel);
+            run_build_queue(void_pkgs, names, tx, cancel, current_child);
         });
     }
 }
 
-fn run_build_queue(void_pkgs: PathBuf, names: Vec<String>, tx: Sender<BuildMsg>, cancel: Arc<AtomicBool>) {
+fn run_build_queue(void_pkgs: PathBuf, names: Vec<String>, tx: Sender<BuildMsg>, cancel: Arc<AtomicBool>, current_child: Arc<Mutex<Option<Child>>>) {
     for name in &names {
         if cancel.load(Ordering::SeqCst) {
             break;
@@ -232,6 +243,8 @@ fn run_build_queue(void_pkgs: PathBuf, names: Vec<String>, tx: Sender<BuildMsg>,
             Ok(mut child) => {
                 let stdout = child.stdout.take();
                 let stderr = child.stderr.take();
+                // Store child so main thread can kill it if needed
+                *current_child.lock().unwrap() = Some(child);
 
                 // Read stdout in a background thread concurrently with stderr to prevent
                 // buffer deadlock when xbps-src writes >64KB to either stream.
@@ -268,16 +281,26 @@ fn run_build_queue(void_pkgs: PathBuf, names: Vec<String>, tx: Sender<BuildMsg>,
                 let build_log = stdout_handle.join().ok().flatten();
 
                 if cancel.load(Ordering::SeqCst) {
-                    let _ = child.kill();
+                    if let Ok(mut guard) = current_child.lock() {
+                        if let Some(ref mut c) = *guard {
+                            let _ = c.kill();
+                        }
+                    }
                 }
 
                 let log_path = build_log.map(|l| l.finish()).unwrap_or_default();
 
-                match child.wait() {
-                    Ok(status) if status.success() => {
+                let wait_result = {
+                    let mut guard = current_child.lock().unwrap();
+                    guard.as_mut().map(|c| c.wait())
+                };
+                *current_child.lock().unwrap() = None;
+
+                match wait_result {
+                    Some(Ok(status)) if status.success() => {
                         let _ = tx.send(BuildMsg::Finished(name.clone(), log_path));
                     }
-                    Ok(_) => {
+                    Some(Ok(_)) | None => {
                         if log_path != PathBuf::new() {
                             if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open(&log_path) {
                                 for line in &stderr_lines {
@@ -293,7 +316,7 @@ fn run_build_queue(void_pkgs: PathBuf, names: Vec<String>, tx: Sender<BuildMsg>,
                         };
                         let _ = tx.send(BuildMsg::Failed(name.clone(), error_lines, log_path));
                     }
-                    Err(e) => {
+                    Some(Err(e)) => {
                         let _ = tx.send(BuildMsg::Failed(name.clone(), vec![e.to_string()], log_path));
                     }
                 }
