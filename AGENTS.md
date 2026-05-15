@@ -94,7 +94,7 @@ Badges: `!so` = SONAME mismatch; `GCC N+` = version-gated.
 - Re-tagging a published release. Procedure exists (`gh release delete`, `git tag -d`, push deletion, re-tag, push, recreate) but is destructive — use only for pre-user-impact fixes, otherwise bump version.
 
 **Untested / known-fragile:**
-- GitHub Actions–only releases (artifact uploads instead of releases-API binaries) — version checking doesn't detect these. In backlog.
+- GitHub Actions–only releases (artifact uploads instead of releases-API binaries) — version checking doesn't detect these. Declined as backlog (no custom package hits this).
 
 ### Cancel / cleanup architecture
 
