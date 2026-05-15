@@ -158,7 +158,7 @@ fn resolve_distfiles_url(raw: &str, vars: &HashMap<String, String>, new_version:
 /// Download a URL, stream to sources_dir for xbps-src caching, and return its SHA256 hex digest.
 fn download_and_checksum(url: &str, sources_dir: &Path, cancel: &Arc<AtomicBool>) -> Result<String> {
     let client = reqwest::blocking::Client::builder()
-        .user_agent("vpm/0.1")
+        .user_agent("vxpm/0.4")
         .redirect(reqwest::redirect::Policy::limited(10))
         .connect_timeout(std::time::Duration::from_secs(30))
         .build()?;

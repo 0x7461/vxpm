@@ -24,6 +24,7 @@ use ratatui::prelude::*;
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
+    config::migrate_legacy_paths();
     let cfg = config::load();
 
     if args.len() > 1 && args[1] == "dump" {
