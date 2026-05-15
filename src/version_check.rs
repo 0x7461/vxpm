@@ -160,20 +160,23 @@ fn check_xbps_src(void_pkgs: &Path, name: &str) -> Result<Option<String>> {
         .output()?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    // Output format: "pkgname-version update to version"
-    // e.g., "google-chrome-133.0.6943.53_1 update to 134.0.6998.35_1"
+    Ok(parse_update_check(name, &stdout))
+}
+
+/// Parse `xbps-src update-check` output.
+/// Format: "pkgname-oldver -> pkgname-newver" (newver may carry "_revision").
+fn parse_update_check(name: &str, stdout: &str) -> Option<String> {
+    let prefix = format!("{name}-");
     for line in stdout.lines() {
-        if line.contains("update to") {
-            let parts: Vec<&str> = line.split("update to").collect();
-            if let Some(new_ver) = parts.get(1) {
-                let ver = new_ver.trim();
-                // Strip _revision if present
-                let ver = ver.split('_').next().unwrap_or(ver);
-                return Ok(Some(ver.to_string()));
-            }
+        let Some((_, rhs)) = line.split_once("->") else { continue };
+        let rhs = rhs.trim();
+        let ver = rhs.strip_prefix(&prefix).unwrap_or(rhs);
+        let ver = ver.split('_').next().unwrap_or(ver);
+        if !ver.is_empty() {
+            return Some(ver.to_string());
         }
     }
-    Ok(None)
+    None
 }
 
 /// Returns the oldest timestamp across all cache entries (seconds since epoch).
@@ -244,3 +247,26 @@ pub fn check_all_versions_streaming(
     let _ = tx.send(VersionMsg::Done(count, false));
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::parse_update_check;
+
+    #[test]
+    fn parses_arrow_format() {
+        let out = "google-chrome-145.0.7632.67 -> google-chrome-148.0.7778.167\n";
+        assert_eq!(parse_update_check("google-chrome", out).as_deref(), Some("148.0.7778.167"));
+    }
+
+    #[test]
+    fn parses_arrow_with_revision_suffix() {
+        let out = "foo-1.0 -> foo-1.2_3\n";
+        assert_eq!(parse_update_check("foo", out).as_deref(), Some("1.2"));
+    }
+
+    #[test]
+    fn returns_none_when_no_update() {
+        assert_eq!(parse_update_check("foo", ""), None);
+        assert_eq!(parse_update_check("foo", "some unrelated line\n"), None);
+    }
+}
