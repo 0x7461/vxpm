@@ -34,11 +34,12 @@ pub fn bump_template(void_pkgs: &Path, name: &str, new_version: &str, log_path: 
     let raw_distfiles = vars.get("distfiles").cloned().unwrap_or_default();
 
     // Resolve the download URL with the new version
-    let download_url = resolve_distfiles_url(&raw_distfiles, &vars, new_version);
+    let resolved = resolve_distfiles_url(&raw_distfiles, &vars, new_version);
     writeln!(log, "=> Resolved distfiles URL:")?;
-    writeln!(log, "   {}", download_url)?;
+    writeln!(log, "   {}", resolved.url)?;
+    writeln!(log, "   cache filename: {}", resolved.cache_filename)?;
 
-    if download_url.is_empty() {
+    if resolved.url.is_empty() {
         writeln!(log, "=> FAILED: could not resolve distfiles URL")?;
         bail!("Could not resolve distfiles URL for {}", name);
     }
@@ -47,7 +48,7 @@ pub fn bump_template(void_pkgs: &Path, name: &str, new_version: &str, log_path: 
     let sources_dir = void_pkgs.join("hostdir").join("sources");
     writeln!(log, "=> Downloading and computing SHA256...")?;
     let _ = log.flush();
-    match download_and_checksum(&download_url, &sources_dir, &cancel) {
+    match download_and_checksum(&resolved.url, &resolved.cache_filename, &sources_dir, &cancel) {
         Ok(new_checksum) => {
             writeln!(log, "   checksum={}", new_checksum)?;
 
@@ -66,7 +67,7 @@ pub fn bump_template(void_pkgs: &Path, name: &str, new_version: &str, log_path: 
         }
         Err(e) => {
             writeln!(log, "=> FAILED: {:?}", e)?;
-            Err(e.context(format!("downloading {}", download_url)))
+            Err(e.context(format!("downloading {}", resolved.url)))
         }
     }
 }
@@ -126,12 +127,23 @@ fn parse_template_vars(content: &str) -> HashMap<String, String> {
     vars
 }
 
+/// A distfile resolved against a specific version: the download URL plus the
+/// filename xbps-src will use to cache it under `hostdir/sources/`.
+struct ResolvedDistfile {
+    url: String,
+    cache_filename: String,
+}
+
 /// Resolve distfiles URL by substituting template variables with the new version.
-fn resolve_distfiles_url(raw: &str, vars: &HashMap<String, String>, new_version: &str) -> String {
-    let mut url = raw.to_string();
+/// Honors xbps-src's `URL>rename` syntax — when present, `rename` is used as the
+/// cache filename (matching xbps-src), since the upstream URL filename is often
+/// version-agnostic (e.g. `zed-linux-x86_64.tar.gz`) and would collide across
+/// releases.
+fn resolve_distfiles_url(raw: &str, vars: &HashMap<String, String>, new_version: &str) -> ResolvedDistfile {
+    let mut expanded = raw.to_string();
 
     // Substitute ${version} with new version
-    url = url.replace("${version}", new_version);
+    expanded = expanded.replace("${version}", new_version);
 
     // Substitute other known variables. Sort longest key first so that a key
     // which is a prefix of another (e.g. $foo vs $foobar) doesn't corrupt the
@@ -143,33 +155,39 @@ fn resolve_distfiles_url(raw: &str, vars: &HashMap<String, String>, new_version:
             continue; // already handled
         }
         let resolved_val = vars[key].replace("${version}", new_version);
-        url = url.replace(&format!("${{{}}}", key), &resolved_val);
-        url = url.replace(&format!("${}", key), &resolved_val);
+        expanded = expanded.replace(&format!("${{{}}}", key), &resolved_val);
+        expanded = expanded.replace(&format!("${}", key), &resolved_val);
     }
 
-    // distfiles can have ">filename" suffix — strip it
-    if let Some(idx) = url.rfind('>') {
-        url = url[..idx].to_string();
-    }
+    // Split off any `>rename` suffix
+    let (url_part, rename_part) = match expanded.rfind('>') {
+        Some(idx) => (expanded[..idx].to_string(), Some(expanded[idx + 1..].trim().to_string())),
+        None => (expanded, None),
+    };
+    let url = url_part.trim().to_string();
 
-    url.trim().to_string()
+    let cache_filename = rename_part.unwrap_or_else(|| {
+        let raw_filename = url.split('/').last().unwrap_or("download");
+        raw_filename.split('?').next().unwrap_or(raw_filename).to_string()
+    });
+
+    ResolvedDistfile { url, cache_filename }
 }
 
 /// Download a URL, stream to sources_dir for xbps-src caching, and return its SHA256 hex digest.
-fn download_and_checksum(url: &str, sources_dir: &Path, cancel: &Arc<AtomicBool>) -> Result<String> {
+/// `cache_filename` is the name used under `sources_dir/` and must match xbps-src's filename
+/// (which is the `>rename` part of a distfiles entry when present, not the URL tail).
+fn download_and_checksum(url: &str, cache_filename: &str, sources_dir: &Path, cancel: &Arc<AtomicBool>) -> Result<String> {
     let client = reqwest::blocking::Client::builder()
-        .user_agent("vpm/0.1")
+        .user_agent("vxpm/0.4")
         .redirect(reqwest::redirect::Policy::limited(10))
         .connect_timeout(std::time::Duration::from_secs(30))
         .build()?;
 
-    // Derive filename from URL for xbps-src source cache
-    let raw_filename = url.split('/').last().unwrap_or("download");
-    let filename = raw_filename.split('?').next().unwrap_or(raw_filename);
     fs::create_dir_all(sources_dir)
         .with_context(|| format!("creating sources dir: {}", sources_dir.display()))?;
-    let final_path = sources_dir.join(filename);
-    let tmp_path = sources_dir.join(format!("{}.tmp", filename));
+    let final_path = sources_dir.join(cache_filename);
+    let tmp_path = sources_dir.join(format!("{}.tmp", cache_filename));
 
     // Reuse cached file if already present (avoids re-downloading after xbps-src or manual dl)
     if final_path.exists() {
@@ -241,4 +259,46 @@ fn rewrite_template(content: &str, new_version: &str, new_checksum: &str) -> Str
         result.push('\n');
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn vars(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+    }
+
+    #[test]
+    fn rename_suffix_becomes_cache_filename() {
+        // zed's distfiles uses >rename because the upstream filename is version-agnostic
+        let raw = "https://github.com/zed-industries/zed/releases/download/v${version}/zed-linux-x86_64.tar.gz>zed-${version}.tar.gz";
+        let r = resolve_distfiles_url(raw, &vars(&[]), "1.2.6");
+        assert_eq!(r.url, "https://github.com/zed-industries/zed/releases/download/v1.2.6/zed-linux-x86_64.tar.gz");
+        assert_eq!(r.cache_filename, "zed-1.2.6.tar.gz");
+    }
+
+    #[test]
+    fn no_rename_uses_url_tail() {
+        let raw = "https://example.com/foo/bar-${version}.tar.gz";
+        let r = resolve_distfiles_url(raw, &vars(&[]), "2.0.0");
+        assert_eq!(r.url, "https://example.com/foo/bar-2.0.0.tar.gz");
+        assert_eq!(r.cache_filename, "bar-2.0.0.tar.gz");
+    }
+
+    #[test]
+    fn channel_var_substitution() {
+        // chrome-style: distfiles uses ${_channel} alongside ${version}
+        let raw = "https://dl.google.com/foo/google-chrome-${_channel}_${version}-1_amd64.deb";
+        let r = resolve_distfiles_url(raw, &vars(&[("_channel", "stable")]), "148.0.7778.167");
+        assert_eq!(r.url, "https://dl.google.com/foo/google-chrome-stable_148.0.7778.167-1_amd64.deb");
+        assert_eq!(r.cache_filename, "google-chrome-stable_148.0.7778.167-1_amd64.deb");
+    }
+
+    #[test]
+    fn query_string_stripped_from_cache_filename() {
+        let raw = "https://example.com/dl?file=foo-${version}.tar.gz";
+        let r = resolve_distfiles_url(raw, &vars(&[]), "1.0");
+        assert_eq!(r.cache_filename, "dl");
+    }
 }

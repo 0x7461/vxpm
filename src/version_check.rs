@@ -109,7 +109,7 @@ fn check_github(owner: &str, repo: &str) -> Result<Option<String>> {
     let client = reqwest::blocking::Client::new();
     let resp = client
         .get(&url)
-        .header("User-Agent", "vpm/0.1")
+        .header("User-Agent", "vxpm/0.4")
         .header("Accept", "application/vnd.github+json")
         .send()?;
 
@@ -128,7 +128,7 @@ fn check_github(owner: &str, repo: &str) -> Result<Option<String>> {
         );
         let resp = client
             .get(&url)
-            .header("User-Agent", "vpm/0.1")
+            .header("User-Agent", "vxpm/0.4")
             .header("Accept", "application/vnd.github+json")
             .send()?;
 

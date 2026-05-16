@@ -69,7 +69,7 @@ fn is_gcc_sufficient(system: (u32, u32, u32), required: (u32, u32)) -> bool {
 
 fn config_path() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
-    PathBuf::from(home).join(".config/vpm/gcc_requirements.toml")
+    PathBuf::from(home).join(".config/vxpm/gcc_requirements.toml")
 }
 
 fn load_requirements() -> HashMap<String, (u32, u32)> {

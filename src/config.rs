@@ -4,9 +4,28 @@ pub struct Config {
     pub void_packages: PathBuf,
 }
 
+/// One-time migration from the legacy `vpm/` paths (pre-rename) to `vxpm/`.
+/// Idempotent: only renames if the source exists and the destination does not.
+pub fn migrate_legacy_paths() {
+    let home = match std::env::var("HOME") {
+        Ok(h) => h,
+        Err(_) => return,
+    };
+    for (old, new) in [
+        (".config/vpm", ".config/vxpm"),
+        (".cache/vpm", ".cache/vxpm"),
+    ] {
+        let old_path = PathBuf::from(&home).join(old);
+        let new_path = PathBuf::from(&home).join(new);
+        if old_path.exists() && !new_path.exists() {
+            let _ = std::fs::rename(&old_path, &new_path);
+        }
+    }
+}
+
 pub fn load() -> Config {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
-    let config_path = PathBuf::from(&home).join(".config/vpm/config.toml");
+    let config_path = PathBuf::from(&home).join(".config/vxpm/config.toml");
 
     if !config_path.exists() {
         bootstrap(&config_path, &home);
