@@ -48,7 +48,7 @@ pub fn bump_template(void_pkgs: &Path, name: &str, new_version: &str, log_path: 
     let sources_dir = void_pkgs.join("hostdir").join("sources");
     writeln!(log, "=> Downloading and computing SHA256...")?;
     let _ = log.flush();
-    match download_and_checksum(&resolved.url, &resolved.cache_filename, &sources_dir, &cancel) {
+    match download_and_checksum(&resolved.url, &resolved.cache_filename, &sources_dir, &cancel, true) {
         Ok(new_checksum) => {
             writeln!(log, "   checksum={}", new_checksum)?;
 
@@ -149,7 +149,7 @@ fn resolve_distfiles_url(raw: &str, vars: &HashMap<String, String>, new_version:
     // which is a prefix of another (e.g. $foo vs $foobar) doesn't corrupt the
     // longer match before it gets a chance to be replaced.
     let mut sorted_keys: Vec<&String> = vars.keys().collect();
-    sorted_keys.sort_by(|a, b| b.len().cmp(&a.len()));
+    sorted_keys.sort_by_key(|k| std::cmp::Reverse(k.len()));
     for key in sorted_keys {
         if key == "version" {
             continue; // already handled
@@ -167,7 +167,7 @@ fn resolve_distfiles_url(raw: &str, vars: &HashMap<String, String>, new_version:
     let url = url_part.trim().to_string();
 
     let cache_filename = rename_part.unwrap_or_else(|| {
-        let raw_filename = url.split('/').last().unwrap_or("download");
+        let raw_filename = url.split('/').next_back().unwrap_or("download");
         raw_filename.split('?').next().unwrap_or(raw_filename).to_string()
     });
 
@@ -177,7 +177,13 @@ fn resolve_distfiles_url(raw: &str, vars: &HashMap<String, String>, new_version:
 /// Download a URL, stream to sources_dir for xbps-src caching, and return its SHA256 hex digest.
 /// `cache_filename` is the name used under `sources_dir/` and must match xbps-src's filename
 /// (which is the `>rename` part of a distfiles entry when present, not the URL tail).
-fn download_and_checksum(url: &str, cache_filename: &str, sources_dir: &Path, cancel: &Arc<AtomicBool>) -> Result<String> {
+///
+/// When `force` is true, any existing cache file at the target path is removed before
+/// downloading. Required on the bump path: xbps-src's content-addressable hardlinks
+/// (`hostdir/sources/by_sha256/`) can populate `<pkg>-<new_version>/<file>` with content
+/// that was looked up using the *old* checksum, so trusting an existing file there would
+/// silently checksum the wrong artifact.
+fn download_and_checksum(url: &str, cache_filename: &str, sources_dir: &Path, cancel: &Arc<AtomicBool>, force: bool) -> Result<String> {
     let client = reqwest::blocking::Client::builder()
         .user_agent("vxpm/0.4")
         .redirect(reqwest::redirect::Policy::limited(10))
@@ -189,8 +195,11 @@ fn download_and_checksum(url: &str, cache_filename: &str, sources_dir: &Path, ca
     let final_path = sources_dir.join(cache_filename);
     let tmp_path = sources_dir.join(format!("{}.tmp", cache_filename));
 
-    // Reuse cached file if already present (avoids re-downloading after xbps-src or manual dl)
-    if final_path.exists() {
+    if force && final_path.exists() {
+        fs::remove_file(&final_path)
+            .with_context(|| format!("removing stale cache file: {}", final_path.display()))?;
+    } else if final_path.exists() {
+        // Reuse cached file if already present (avoids re-downloading after xbps-src or manual dl)
         let mut f = fs::File::open(&final_path)
             .with_context(|| format!("opening cached file: {}", final_path.display()))?;
         let mut hasher = Sha256::new();
