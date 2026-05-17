@@ -47,8 +47,8 @@ pub fn load() -> Config {
 }
 
 fn expand_tilde(path: &str, home: &str) -> PathBuf {
-    if path.starts_with("~/") {
-        PathBuf::from(home).join(&path[2..])
+    if let Some(stripped) = path.strip_prefix("~/") {
+        PathBuf::from(home).join(stripped)
     } else if path == "~" {
         PathBuf::from(home)
     } else {
