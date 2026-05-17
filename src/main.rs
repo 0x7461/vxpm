@@ -24,6 +24,21 @@ use ratatui::prelude::*;
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
+
+    if let Some(arg) = args.get(1).map(String::as_str) {
+        match arg {
+            "--version" | "-V" => {
+                println!("vxpm {}", env!("CARGO_PKG_VERSION"));
+                return Ok(());
+            }
+            "--help" | "-h" => {
+                print_help();
+                return Ok(());
+            }
+            _ => {}
+        }
+    }
+
     config::migrate_legacy_paths();
     let cfg = config::load();
 
@@ -32,6 +47,18 @@ fn main() -> Result<()> {
     }
 
     run_tui(cfg)
+}
+
+fn print_help() {
+    println!("vxpm {} — TUI for managing custom void-packages templates", env!("CARGO_PKG_VERSION"));
+    println!();
+    println!("USAGE:");
+    println!("    vxpm                Launch the interactive TUI");
+    println!("    vxpm dump           Print package state as JSON and exit");
+    println!("    vxpm --version|-V   Print version and exit");
+    println!("    vxpm --help|-h      Print this help and exit");
+    println!();
+    println!("In-TUI keybinds: press ? after launch, or see README.md.");
 }
 
 fn dump(cfg: &config::Config) -> Result<()> {
