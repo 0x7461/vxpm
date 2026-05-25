@@ -36,6 +36,19 @@ Built for the workflow of maintaining self-built packages on Void Linux — trac
 | `?` | Help |
 | `q` | Quit |
 
+## Non-interactive CLI
+
+For cron/runit automation:
+
+```sh
+vxpm check-updates           # list "<name> <cur> -> <latest>" lines
+vxpm check-updates --json    # same, as JSON
+vxpm bump <pkg>              # bump one template + checksum (no build)
+vxpm bump --all              # bump every UpstreamAhead pkg
+```
+
+Exit codes (grep convention): `0` = no updates / success, `1` = updates available / partial failure, `2` = GitHub rate-limited.
+
 ## Install
 
 Download the binary from [releases](https://github.com/0x7461/vxpm/releases) or build from source:

@@ -1,5 +1,6 @@
 mod app;
 mod build;
+mod cli;
 mod config;
 mod dep_graph;
 mod gcc;
@@ -40,23 +41,32 @@ fn main() -> Result<()> {
     }
 
     config::migrate_legacy_paths();
-    let cfg = config::load();
 
-    if args.len() > 1 && args[1] == "dump" {
-        return dump(&cfg);
+    if let Some(sub) = args.get(1).map(String::as_str) {
+        match sub {
+            "dump" => return dump(&config::load()),
+            "check-updates" | "bump" => {
+                let code = cli::run(&args[1..])?;
+                std::process::exit(code);
+            }
+            _ => {}
+        }
     }
 
-    run_tui(cfg)
+    run_tui(config::load())
 }
 
 fn print_help() {
     println!("vxpm {} — TUI for managing custom void-packages templates", env!("CARGO_PKG_VERSION"));
     println!();
     println!("USAGE:");
-    println!("    vxpm                Launch the interactive TUI");
-    println!("    vxpm dump           Print package state as JSON and exit");
-    println!("    vxpm --version|-V   Print version and exit");
-    println!("    vxpm --help|-h      Print this help and exit");
+    println!("    vxpm                          Launch the interactive TUI");
+    println!("    vxpm dump                     Print package state as JSON and exit");
+    println!("    vxpm check-updates [--json]   List packages with upstream updates");
+    println!("    vxpm bump <pkg>               Bump template + checksum for one package");
+    println!("    vxpm bump --all               Bump every UpstreamAhead package");
+    println!("    vxpm --version|-V             Print version and exit");
+    println!("    vxpm --help|-h                Print this help and exit");
     println!();
     println!("In-TUI keybinds: press ? after launch, or see README.md.");
 }

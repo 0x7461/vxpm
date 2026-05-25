@@ -1,6 +1,6 @@
 # AGENTS.md — vxpm
 
-Updated: 2026-05-09
+Updated: 2026-05-25
 
 Rust/ratatui TUI for managing the ~24 custom packages in `~/void-packages` (18 Hyprland-ecosystem + 6 others). Tracks versions, checks upstream, computes dependency-aware build order, rebuilds dependents, and drives the git workflow — replaces manual checking when bumping `hyprutils` requires rebuilding 15+ packages. Published as `0x7461/vxpm` on GitHub; xbps-src template at `~/void-packages/srcpkgs/vxpm/template`.
 
@@ -21,6 +21,10 @@ Rust toolchain via `rustup` (not proto). Requires Void Linux with `xbps-query`, 
 cargo build --release
 ./target/release/vxpm                    # interactive TUI
 ./target/release/vxpm dump               # non-interactive package state dump (JSON)
+./target/release/vxpm check-updates      # list pkgs with upstream updates (exit 0/1/2)
+./target/release/vxpm check-updates --json
+./target/release/vxpm bump <pkg>         # bump one template + checksum (no build)
+./target/release/vxpm bump --all         # bump every UpstreamAhead pkg
 
 # Tests / lints
 cargo test
@@ -36,7 +40,8 @@ Config bootstrap: `~/.config/vxpm/config.toml` is auto-created on first run. GCC
 
 ```
 src/
-├── main.rs            entry, args, `dump` subcommand
+├── main.rs            entry, args, subcommand dispatch
+├── cli.rs             non-interactive `check-updates` / `bump` subcommands
 ├── app.rs             App state, event handling, views
 ├── ui.rs              rendering (list / tree / detail)
 ├── package.rs         template parser, Package/PackageState/Status
