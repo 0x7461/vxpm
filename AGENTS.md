@@ -30,8 +30,9 @@ cargo build --release
 cargo test
 cargo clippy --all-targets
 
-# Publish a new version (full procedure in PUBLISHING.md)
-cargo bump <patch|minor|major>           # then git tag, push, GH Actions builds
+# Publish a new version (full procedure in PLAN.md ## Operations / Publishing)
+# NOTE: `cargo bump` is NOT installed — edit Cargo.toml `version` by hand, then
+# `cargo build` to refresh Cargo.lock. Then: git tag v<x.y.z>, push tag → GH Actions builds.
 ```
 
 Config bootstrap: `~/.config/vxpm/config.toml` is auto-created on first run. GCC gate requirements: `~/.config/vxpm/gcc_requirements.toml`.
