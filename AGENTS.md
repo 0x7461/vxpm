@@ -1,6 +1,6 @@
 # AGENTS.md — vxpm
 
-Updated: 2026-05-25
+Updated: 2026-06-01
 
 Rust/ratatui TUI for managing the ~24 custom packages in `~/void-packages` (18 Hyprland-ecosystem + 6 others). Tracks versions, checks upstream, computes dependency-aware build order, rebuilds dependents, and drives the git workflow — replaces manual checking when bumping `hyprutils` requires rebuilding 15+ packages. Published as `0x7461/vxpm` on GitHub; xbps-src template at `~/void-packages/srcpkgs/vxpm/template`.
 
@@ -24,7 +24,7 @@ cargo build --release
 ./target/release/vxpm check-updates      # list pkgs with upstream updates (exit 0/1/2)
 ./target/release/vxpm check-updates --json
 ./target/release/vxpm bump <pkg>         # bump one template + checksum (no build)
-./target/release/vxpm bump --all         # bump every UpstreamAhead pkg
+./target/release/vxpm bump --all         # bump every pkg with an upstream update
 
 # Tests / lints
 cargo test
@@ -68,12 +68,13 @@ External integration points:
 |---|---|---|
 | 0 | BUILD FAILED | Build attempted, failed. Log available. |
 | 1 | NOT INSTALLED | Template exists, no .xbps, not installed. |
-| 2 | UPDATE AVAIL | Upstream newer than template. |
-| 3 | NEEDS BUILD | Template newer than built .xbps (or no .xbps). |
-| 4 | BUILD READY | .xbps newer than installed (or not installed but .xbps exists). |
-| 5 | OK | Installed matches template, no upstream updates. |
+| 2 | NEEDS BUILD | Template newer than built .xbps (or no .xbps). |
+| 3 | BUILD READY | .xbps newer than installed (or not installed but .xbps exists). |
+| 4 | OK | Installed matches template. |
 
-Badges: `!so` = SONAME mismatch; `GCC N+` = version-gated.
+The pipeline tracks **only the local build→install lifecycle**. "Upstream has a newer release" is an *orthogonal* axis (`PackageState::upstream_newer()`), not a pipeline state — a package can be e.g. NEEDS BUILD *and* have an upstream update. It surfaces as the `↑` badge + the `latest` column, and gates only the bump key (`t` / `bump --all`), never the build. (Previously it was wedged in as a top-priority status that masked the real build state and blocked builds — fixed 2026-06-01.)
+
+Badges: `↑` = upstream update available; `!so` = SONAME mismatch; `GCC N+` = version-gated.
 
 ## Boundaries & gotchas
 

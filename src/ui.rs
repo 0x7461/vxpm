@@ -44,7 +44,6 @@ fn elapsed_label(secs: u64) -> String {
 fn status_color(status: &Status) -> Color {
     match status {
         Status::UpToDate => GREEN,
-        Status::UpstreamAhead => PEACH,
         Status::BuildOutdated => YELLOW,
         Status::ReadyToInstall => TEAL,
         Status::BuildFailed => RED,
@@ -270,6 +269,10 @@ fn draw_package_list(
             if gcc_info.is_blocked(&ps.package.name) {
                 let req = gcc_info.required_version(&ps.package.name).unwrap_or_default();
                 status_label.push_str(&format!(" GCC {}+", req));
+            }
+            // Upstream update available — orthogonal to the lifecycle status above.
+            if !ps.uncommitted && ps.upstream_newer() {
+                status_label.push_str(" ↑");
             }
 
             let status_fg = if ps.uncommitted {

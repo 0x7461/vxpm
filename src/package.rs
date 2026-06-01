@@ -40,7 +40,6 @@ pub struct PackageState {
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub enum Status {
     UpToDate,
-    UpstreamAhead,
     BuildOutdated,
     ReadyToInstall,
     BuildFailed,
@@ -50,7 +49,6 @@ impl Status {
     pub fn label(&self) -> &'static str {
         match self {
             Status::UpToDate => "UP TO DATE",
-            Status::UpstreamAhead => "UPSTREAM AHEAD",
             Status::BuildOutdated => "BUILD OUTDATED",
             Status::ReadyToInstall => "READY TO INSTALL",
             Status::BuildFailed => "BUILD FAILED",
@@ -65,16 +63,13 @@ impl PackageState {
         package: &Package,
         installed: &Option<String>,
         built: &Option<String>,
-        latest: &Option<String>,
     ) -> Status {
         let template_ver = format!("{}_{}",  package.version, package.revision);
 
-        // Upstream gap: upstream > template (highest priority — act on this first)
-        if let Some(latest_ver) = latest {
-            if version_newer(latest_ver, &package.version) {
-                return Status::UpstreamAhead;
-            }
-        }
+        // Note: an available upstream release (latest > template) is deliberately
+        // NOT a status here — it's orthogonal to the local build→install lifecycle
+        // and would mask a genuinely pending build. It's surfaced separately via
+        // `upstream_newer()` (badge + the `latest` column) and gates only the bump key.
 
         // Template → build gap: nothing built yet
         if built.is_none() && installed.is_none() {
@@ -111,13 +106,26 @@ impl PackageState {
 
     /// One-line action hint shown in the detail panel.
     pub fn action_hint(&self) -> &'static str {
+        // An upstream update is independent of the build lifecycle, so prompt for
+        // a bump first when one is available — whatever the local build state.
+        if self.upstream_newer() {
+            return "Press t to bump the template to the upstream version (or b to build the current one).";
+        }
         match &self.status {
             Status::UpToDate => "Nothing to do.",
-            Status::UpstreamAhead => "Press t to bump the template to the upstream version.",
             Status::BuildOutdated => "Press b to build the package.",
             Status::ReadyToInstall => "Run xi <pkg> to install the built package.",
             Status::BuildFailed => "Check the build log. Press b to retry.",
         }
+    }
+
+    /// Whether upstream has a release newer than the template version. Independent
+    /// of `status` (the build→install lifecycle): a package can both need a build
+    /// and have an upstream update available.
+    pub fn upstream_newer(&self) -> bool {
+        self.latest
+            .as_ref()
+            .is_some_and(|l| version_newer(l, &self.package.version))
     }
 }
 
@@ -362,5 +370,65 @@ mod tests {
             installed_to_ver_rev("google-chrome-133.0.6943.53_1"),
             "133.0.6943.53_1"
         );
+    }
+
+    fn pkg(version: &str, revision: u32) -> Package {
+        Package {
+            name: "zig".into(),
+            version: version.into(),
+            revision,
+            short_desc: String::new(),
+            homepage: String::new(),
+            build_style: String::new(),
+            makedepends: vec![],
+            hostmakedepends: vec![],
+            depends: vec![],
+            distfiles: String::new(),
+            changelog: String::new(),
+        }
+    }
+
+    fn state(package: Package, latest: Option<&str>) -> PackageState {
+        let status = PackageState::compute_status(&package, &None, &None);
+        PackageState {
+            package,
+            installed: None,
+            built: None,
+            latest: latest.map(String::from),
+            status,
+            uncommitted: false,
+            shlibs: vec![],
+            soname_mismatches: vec![],
+            build_log: None,
+        }
+    }
+
+    // compute_status reflects only the local build→install lifecycle; an available
+    // upstream release must NOT mask a genuinely pending build.
+    #[test]
+    fn compute_status_ignores_upstream() {
+        // Pinned template at 0.15.2, an older build present → still BUILD OUTDATED,
+        // even though upstream (tracked separately) may be ahead.
+        let p = pkg("0.15.2", 1);
+        let s = PackageState::compute_status(&p, &Some("zig-0.15.1_1".into()), &Some("0.15.1_1".into()));
+        assert_eq!(s, Status::BuildOutdated);
+
+        // Built and installed match the template → UP TO DATE.
+        let s = PackageState::compute_status(&p, &Some("zig-0.15.2_1".into()), &Some("0.15.2_1".into()));
+        assert_eq!(s, Status::UpToDate);
+    }
+
+    // upstream_newer is an independent axis from status: a package can both need a
+    // build and have an upstream update (the case the old single-status enum masked).
+    #[test]
+    fn upstream_newer_is_independent_of_status() {
+        let s = state(pkg("0.15.2", 1), Some("0.16.0"));
+        assert!(s.upstream_newer());
+        assert_eq!(s.status, Status::BuildOutdated); // pinned, nothing built yet
+
+        // No upstream info known, or upstream not newer → false.
+        assert!(!state(pkg("0.15.2", 1), None).upstream_newer());
+        assert!(!state(pkg("0.15.2", 1), Some("0.15.2")).upstream_newer());
+        assert!(!state(pkg("0.15.2", 1), Some("0.15.1")).upstream_newer());
     }
 }

@@ -276,7 +276,7 @@ pub fn build_package_states(void_pkgs: &Path, packages: Vec<Package>, uncommitte
         .map(|pkg| {
             let installed = query_installed(&pkg.name);
             let built = find_built_xbps(void_pkgs, &pkg.name);
-            let status = PackageState::compute_status(&pkg, &installed, &built, &None);
+            let status = PackageState::compute_status(&pkg, &installed, &built);
             let is_uncommitted = uncommitted.contains(&pkg.name);
             PackageState {
                 package: pkg,

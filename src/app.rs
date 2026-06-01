@@ -253,7 +253,6 @@ impl App {
                         &state.package,
                         &state.installed,
                         &state.built,
-                        &state.latest,
                     );
                 }
                 if failed.contains(&state.package.name) {
@@ -337,7 +336,6 @@ impl App {
                                 &state.package,
                                 &state.installed,
                                 &state.built,
-                                &state.latest,
                             );
                         }
                     }
@@ -405,14 +403,14 @@ impl App {
         }
     }
 
-    /// Bump template for the selected package (UpstreamAhead only). Does not build.
+    /// Bump template for the selected package (only when upstream is ahead). Does not build.
     pub fn bump_template_selected(&mut self) {
         if self.template_bumping {
             self.status_msg = Some("Template bump already in progress".to_string());
             return;
         }
         let (name, latest) = match self.selected_package() {
-            Some(p) if p.status == Status::UpstreamAhead => match p.latest.clone() {
+            Some(p) if p.upstream_newer() => match p.latest.clone() {
                 Some(v) => (p.package.name.clone(), v),
                 None => {
                     self.status_msg = Some("No upstream version known — run u first".to_string());
@@ -448,7 +446,7 @@ impl App {
         });
     }
 
-    /// Bump templates for all UpstreamAhead packages. Does not build.
+    /// Bump templates for all packages with an upstream update. Does not build.
     pub fn bump_template_all(&mut self) {
         if self.template_bumping {
             self.status_msg = Some("Template bump already in progress".to_string());
@@ -457,7 +455,7 @@ impl App {
         let targets: Vec<(String, String)> = self
             .packages
             .iter()
-            .filter(|p| p.status == Status::UpstreamAhead)
+            .filter(|p| p.upstream_newer())
             .filter_map(|p| p.latest.as_ref().map(|v| (p.package.name.clone(), v.clone())))
             .collect();
         if targets.is_empty() {
@@ -652,10 +650,6 @@ impl App {
 
         match status {
             Status::BuildOutdated | Status::BuildFailed => {}
-            Status::UpstreamAhead => {
-                self.status_msg = Some(format!("{} — upstream ahead, bump template first (t)", name));
-                return;
-            }
             Status::ReadyToInstall => {
                 self.status_msg = Some(format!("{} — already built, run: xi {}", name, name));
                 return;
@@ -945,9 +939,13 @@ impl App {
     pub fn status_counts(&self) -> StatusCounts {
         let mut counts = StatusCounts::default();
         for p in &self.packages {
+            // upstream-ahead is orthogonal to the build lifecycle: count it separately
+            // so a package can be both (e.g.) BUILD OUTDATED and have an upstream update.
+            if p.upstream_newer() {
+                counts.upstream_ahead += 1;
+            }
             match p.status {
                 Status::UpToDate => counts.up_to_date += 1,
-                Status::UpstreamAhead => counts.upstream_ahead += 1,
                 Status::BuildOutdated => counts.build_outdated += 1,
                 Status::ReadyToInstall => counts.ready_to_install += 1,
                 Status::BuildFailed => counts.build_failed += 1,

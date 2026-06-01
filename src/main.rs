@@ -64,7 +64,7 @@ fn print_help() {
     println!("    vxpm dump                     Print package state as JSON and exit");
     println!("    vxpm check-updates [--json]   List packages with upstream updates");
     println!("    vxpm bump <pkg>               Bump template + checksum for one package");
-    println!("    vxpm bump --all               Bump every UpstreamAhead package");
+    println!("    vxpm bump --all               Bump every package with an upstream update");
     println!("    vxpm --version|-V             Print version and exit");
     println!("    vxpm --help|-h                Print this help and exit");
     println!();
