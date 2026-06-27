@@ -212,28 +212,41 @@ fn preview_names(names: &[String], n: usize) -> String {
     }
 }
 
-/// Extract the version from an xbps pkgver, e.g. `curl-8.20.0_1` -> `8.20.0`.
-/// `None` for empty input.
-fn pkgver_version(pkgver: &str) -> Option<String> {
-    let pkgver = pkgver.trim();
-    if pkgver.is_empty() {
-        return None;
+/// True if a binary with this exact pkgver already exists under `hostdir/binpkgs` (built
+/// earlier). Filename layout: `<pkgver>.<arch>.xbps`.
+fn local_binpkg_exists(void_pkgs: &Path, pkgver: &str) -> bool {
+    let prefix = format!("{}.", pkgver); // trailing '.' disambiguates _1 from _11 etc.
+    let Ok(repos) = std::fs::read_dir(void_pkgs.join("hostdir/binpkgs")) else {
+        return false;
+    };
+    for repo in repos.flatten() {
+        if let Ok(files) = std::fs::read_dir(repo.path()) {
+            for f in files.flatten() {
+                let name = f.file_name().to_string_lossy().to_string();
+                if name.starts_with(&prefix) && name.ends_with(".xbps") {
+                    return true;
+                }
+            }
+        }
     }
-    let after_name = pkgver.rsplit_once('-').map_or(pkgver, |(_, v)| v);
-    Some(after_name.split('_').next().unwrap_or(after_name).to_string())
+    false
 }
 
-/// The available binary version of `dep` from the configured repos, e.g. "8.20.0" from
-/// `curl-8.20.0_1`. `None` when no binary package exists (→ xbps-src builds it from source).
-fn binary_version(dep: &str) -> Option<String> {
-    let out = Command::new("xbps-query")
-        .args(["-R", "--property=pkgver", dep])
+/// True if a binary matching this *exact* pkgver is installable — from the remote repos or
+/// already built into `hostdir/binpkgs`. xbps-src builds a dep from source unless the exact
+/// version pinned in the local tree is available; the remote shipping a *different* version
+/// (newer or older) does not satisfy it. This is direction-agnostic — both a tree ahead of
+/// the repo and a tree behind it trigger source builds.
+fn binary_available_exact(void_pkgs: &Path, pkgver: &str) -> bool {
+    if let Ok(o) = Command::new("xbps-query")
+        .args(["-R", "--property=pkgver", pkgver])
         .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
+    {
+        if o.status.success() && !String::from_utf8_lossy(&o.stdout).trim().is_empty() {
+            return true;
+        }
     }
-    pkgver_version(&String::from_utf8_lossy(&out.stdout))
+    local_binpkg_exists(void_pkgs, pkgver)
 }
 
 /// Build-deps of `job_names` that xbps-src will compile from source rather than install as a
@@ -269,10 +282,10 @@ fn source_build_deps(void_pkgs: &Path, job_names: &[String]) -> Vec<String> {
             let Ok(pkg) = crate::package::parse_template(&tmpl) else {
                 return false;
             };
-            match binary_version(dep) {
-                None => true, // no binary at all → builds from source
-                Some(bv) => crate::package::version_newer_pub(&pkg.version, &bv),
-            }
+            // xbps-src needs the exact version pinned in the local tree; if no binary matches
+            // it (in either direction), the dep compiles from source.
+            let pkgver = format!("{}-{}_{}", dep, pkg.version, pkg.revision);
+            !binary_available_exact(void_pkgs, &pkgver)
         })
         .collect()
 }
@@ -301,7 +314,7 @@ pub fn preflight(void_pkgs: &Path, jobs: &[BuildJob]) -> Vec<PreflightWarning> {
     if !from_source.is_empty() {
         warnings.push(PreflightWarning {
             message: format!(
-                "{} dependenc{} will build from source (no binary / repo lag): {} — expect extra compile time",
+                "{} dependenc{} will build from source (no binary matches the pinned version): {} — expect extra compile time",
                 from_source.len(),
                 if from_source.len() == 1 { "y" } else { "ies" },
                 preview_names(&from_source, 4)
@@ -535,10 +548,16 @@ mod tests {
     }
 
     #[test]
-    fn pkgver_version_extracts_version() {
-        assert_eq!(pkgver_version("curl-8.20.0_1").as_deref(), Some("8.20.0"));
-        assert_eq!(pkgver_version("ca-certificates-20250419+3.125_1").as_deref(), Some("20250419+3.125"));
-        assert_eq!(pkgver_version("  openssl-3.6.3_1  ").as_deref(), Some("3.6.3"));
-        assert_eq!(pkgver_version(""), None);
+    fn local_binpkg_exact_match() {
+        let root = temp_void_pkgs("binpkg");
+        let repo = root.join("hostdir/binpkgs/custom");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::write(repo.join("curl-8.20.0_1.x86_64.xbps"), b"").unwrap();
+
+        assert!(local_binpkg_exists(&root, "curl-8.20.0_1"));
+        // exact match only — different revision / version must not match
+        assert!(!local_binpkg_exists(&root, "curl-8.20.0_2"));
+        assert!(!local_binpkg_exists(&root, "curl-8.21.0_1"));
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
