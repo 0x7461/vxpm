@@ -36,6 +36,8 @@ Built for the workflow of maintaining self-built packages on Void Linux — trac
 | `?` | Help |
 | `q` | Quit |
 
+Before a build, vxpm runs pre-flight checks and shows a warning modal if the masterdir has leftover build state or dependencies would compile from source. In the modal: `c` = clean & build, `b` = build anyway, `Esc`/`q` = dismiss (do nothing).
+
 ## Non-interactive CLI
 
 For cron/runit automation:

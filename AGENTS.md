@@ -80,6 +80,7 @@ Badges: `↑` = upstream update available; `!so` = SONAME mismatch; `GCC N+` = v
 ## Boundaries & gotchas
 
 **Always do:**
+- **Run pre-build checks via `build::preflight()` off-thread** (spawned in `gate_build`, drained by `poll_preflight`). They shell out to `xbps-src show-build-deps` + `xbps-query -R` (~1.5s for one build, more for `B`); running synchronously freezes the UI. Build jobs stage in `build_queue.jobs` and only `start()` once pre-flight clears or the user proceeds.
 - **Use `default-features = false, features = ["rustls-tls"]` for `reqwest`.** Default features pull `openssl-sys`; rustls-tls works on Void without system openssl-dev.
 - **Stream large downloads, hash in 64KB chunks.** `.bytes()` buffers in memory and times out on tarballs like ollama (~1.9 GB). See `version_check.rs`.
 - **Cache downloads to `hostdir/sources/<filename>`.** `download_and_checksum` streams to disk while hashing; if the file is already present, skip the network. Avoids double-download (vxpm + xbps-src).

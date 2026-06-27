@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::{BufRead, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -169,6 +169,171 @@ pub fn prune_build_logs(max_per_pkg: usize) {
     }
 }
 
+// --- Pre-flight checks ---
+
+/// A condition worth surfacing to the user before a build starts.
+/// `cleanable` = a `./xbps-src clean` would resolve it (offers the "clean & build" action).
+pub struct PreflightWarning {
+    pub message: String,
+    pub cleanable: bool,
+}
+
+/// Leftover entries under any `masterdir-*/builddir/`. A clean masterdir has an empty
+/// builddir; anything here is residue from an interrupted/failed build and can cause
+/// `cannot access wrksrc` failures when versions no longer match.
+fn dirty_masterdir_entries(void_pkgs: &Path) -> Vec<String> {
+    let mut out = Vec::new();
+    let Ok(rd) = std::fs::read_dir(void_pkgs) else {
+        return out;
+    };
+    for entry in rd.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !name.starts_with("masterdir") {
+            continue;
+        }
+        if let Ok(builddir) = std::fs::read_dir(entry.path().join("builddir")) {
+            for be in builddir.flatten() {
+                out.push(be.file_name().to_string_lossy().to_string());
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// Up to `n` names joined, with a "+N more" suffix when truncated.
+fn preview_names(names: &[String], n: usize) -> String {
+    let shown: Vec<&str> = names.iter().take(n).map(|s| s.as_str()).collect();
+    let more = names.len().saturating_sub(shown.len());
+    if more > 0 {
+        format!("{}, +{} more", shown.join(", "), more)
+    } else {
+        shown.join(", ")
+    }
+}
+
+/// Extract the version from an xbps pkgver, e.g. `curl-8.20.0_1` -> `8.20.0`.
+/// `None` for empty input.
+fn pkgver_version(pkgver: &str) -> Option<String> {
+    let pkgver = pkgver.trim();
+    if pkgver.is_empty() {
+        return None;
+    }
+    let after_name = pkgver.rsplit_once('-').map_or(pkgver, |(_, v)| v);
+    Some(after_name.split('_').next().unwrap_or(after_name).to_string())
+}
+
+/// The available binary version of `dep` from the configured repos, e.g. "8.20.0" from
+/// `curl-8.20.0_1`. `None` when no binary package exists (→ xbps-src builds it from source).
+fn binary_version(dep: &str) -> Option<String> {
+    let out = Command::new("xbps-query")
+        .args(["-R", "--property=pkgver", dep])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    pkgver_version(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// Build-deps of `job_names` that xbps-src will compile from source rather than install as a
+/// binary: either no binary exists, or the local template is ahead of the available binary
+/// (repo lag). This is the surprise when a binary-repack package drags in a full deps build.
+fn source_build_deps(void_pkgs: &Path, job_names: &[String]) -> Vec<String> {
+    let mut deps: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for name in job_names {
+        let out = Command::new("./xbps-src")
+            .args(["show-build-deps", name])
+            .current_dir(void_pkgs)
+            .output();
+        if let Ok(o) = out {
+            if o.status.success() {
+                for line in String::from_utf8_lossy(&o.stdout).lines() {
+                    let d = line.trim();
+                    if !d.is_empty() {
+                        deps.insert(d.to_string());
+                    }
+                }
+            }
+        }
+    }
+    // The packages being built are not their own "from source" deps.
+    for name in job_names {
+        deps.remove(name);
+    }
+
+    deps.into_iter()
+        .filter(|dep| {
+            let tmpl = void_pkgs.join("srcpkgs").join(dep).join("template");
+            // Skip virtuals / non-tree deps we can't resolve — under-warn rather than over-warn.
+            let Ok(pkg) = crate::package::parse_template(&tmpl) else {
+                return false;
+            };
+            match binary_version(dep) {
+                None => true, // no binary at all → builds from source
+                Some(bv) => crate::package::version_newer_pub(&pkg.version, &bv),
+            }
+        })
+        .collect()
+}
+
+/// Conditions to warn about before launching `jobs`. Empty = nothing to flag, build directly.
+pub fn preflight(void_pkgs: &Path, jobs: &[BuildJob]) -> Vec<PreflightWarning> {
+    let mut warnings = Vec::new();
+
+    // #1 — leftover masterdir build state (cleanable).
+    let leftover = dirty_masterdir_entries(void_pkgs);
+    if !leftover.is_empty() {
+        warnings.push(PreflightWarning {
+            message: format!(
+                "masterdir has {} leftover build dir(s) from an interrupted build ({}); \
+                 these can cause 'cannot access wrksrc' failures",
+                leftover.len(),
+                preview_names(&leftover, 3)
+            ),
+            cleanable: true,
+        });
+    }
+
+    // #2 — dependencies that will compile from source (repo lag / no binary).
+    let job_names: Vec<String> = jobs.iter().map(|j| j.name.clone()).collect();
+    let from_source = source_build_deps(void_pkgs, &job_names);
+    if !from_source.is_empty() {
+        warnings.push(PreflightWarning {
+            message: format!(
+                "{} dependenc{} will build from source (no binary / repo lag): {} — expect extra compile time",
+                from_source.len(),
+                if from_source.len() == 1 { "y" } else { "ies" },
+                preview_names(&from_source, 4)
+            ),
+            cleanable: false,
+        });
+    }
+
+    warnings
+}
+
+/// Run `./xbps-src clean` + `remove-autodeps` to reset masterdir build state. Fast (no compile).
+/// Returns a status line for the UI.
+pub fn clean_masterdir(void_pkgs: &Path) -> String {
+    let clean = Command::new("./xbps-src")
+        .arg("clean")
+        .current_dir(void_pkgs)
+        .output();
+    let _ = Command::new("./xbps-src")
+        .arg("remove-autodeps")
+        .current_dir(void_pkgs)
+        .output();
+    match clean {
+        Ok(o) if o.status.success() => "Cleaned masterdir build state".to_string(),
+        Ok(o) => format!(
+            "Clean failed: {}",
+            String::from_utf8_lossy(&o.stderr).lines().last().unwrap_or("non-zero exit")
+        ),
+        Err(e) => format!("Clean failed: {}", e),
+    }
+}
+
 // --- Build Queue ---
 
 pub struct BuildQueue {
@@ -329,4 +494,51 @@ fn run_build_queue(void_pkgs: PathBuf, names: Vec<String>, tx: Sender<BuildMsg>,
     }
 
     let _ = tx.send(BuildMsg::QueueComplete);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_void_pkgs(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("vxpm-test-{}-{}", tag, std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn empty_builddir_is_not_dirty() {
+        let root = temp_void_pkgs("clean");
+        std::fs::create_dir_all(root.join("masterdir-x86_64/builddir")).unwrap();
+        assert!(dirty_masterdir_entries(&root).is_empty());
+        assert!(preflight(&root, &[]).is_empty());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn leftover_builddir_entries_flagged() {
+        let root = temp_void_pkgs("dirty");
+        let bd = root.join("masterdir-x86_64/builddir");
+        std::fs::create_dir_all(bd.join("curl-8.19.0")).unwrap();
+        std::fs::create_dir_all(bd.join(".xbps-zed")).unwrap();
+
+        let entries = dirty_masterdir_entries(&root);
+        assert_eq!(entries.len(), 2);
+        assert!(entries.contains(&"curl-8.19.0".to_string()));
+
+        let warnings = preflight(&root, &[]);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].cleanable);
+        assert!(warnings[0].message.contains("curl-8.19.0"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn pkgver_version_extracts_version() {
+        assert_eq!(pkgver_version("curl-8.20.0_1").as_deref(), Some("8.20.0"));
+        assert_eq!(pkgver_version("ca-certificates-20250419+3.125_1").as_deref(), Some("20250419+3.125"));
+        assert_eq!(pkgver_version("  openssl-3.6.3_1  ").as_deref(), Some("3.6.3"));
+        assert_eq!(pkgver_version(""), None);
+    }
 }

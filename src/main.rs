@@ -99,6 +99,7 @@ fn run_tui(cfg: config::Config) -> Result<()> {
 
     loop {
         app.poll_build();
+        app.poll_preflight();
         app.poll_version_check();
         app.poll_template_bump();
         app.poll_git();
@@ -124,6 +125,14 @@ fn run_tui(cfg: config::Config) -> Result<()> {
                         KeyCode::Enter => app.stop_filter(false),
                         KeyCode::Backspace => app.filter_backspace(),
                         KeyCode::Char(c) => app.filter_input(c),
+                        _ => {}
+                    }
+                } else if app.build_preflight.is_some() {
+                    // Build pre-flight modal: clean & build / build anyway / dismiss.
+                    match key.code {
+                        KeyCode::Char('c') if app.preflight_cleanable() => app.preflight_clean_and_build(),
+                        KeyCode::Char('b') => app.preflight_proceed(),
+                        KeyCode::Esc | KeyCode::Char('q') => app.preflight_dismiss(),
                         _ => {}
                     }
                 } else {

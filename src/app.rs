@@ -74,6 +74,9 @@ pub struct App {
     pub bump_log_scroll: usize,
     pub cancel_confirm: Option<String>, // op name being cancelled ("build"/"bump"/"git")
     pub quit_confirm: bool,
+    pub build_preflight: Option<Vec<build::PreflightWarning>>, // pending build gated on warnings; jobs staged in build_queue
+    pub preflight_pending: bool, // pre-flight check running in background (jobs staged, not yet started)
+    pub preflight_rx: Option<Receiver<Vec<build::PreflightWarning>>>,
 }
 
 /// Discover and load all packages (committed + uncommitted).
@@ -150,6 +153,9 @@ impl App {
             bump_log_scroll: 0,
             cancel_confirm: None,
             quit_confirm: false,
+            build_preflight: None,
+            preflight_pending: false,
+            preflight_rx: None,
         })
     }
 
@@ -638,7 +644,7 @@ impl App {
 
     /// Build the currently selected package (best-effort: skip if not buildable).
     pub fn build_selected(&mut self) {
-        if self.build_queue.active {
+        if self.build_queue.active || self.preflight_pending {
             self.status_msg = Some("Build already in progress".to_string());
             return;
         }
@@ -673,13 +679,12 @@ impl App {
             name,
             status: BuildJobStatus::Pending,
         }];
-        self.build_queue.start(self.void_pkgs.clone());
-        self.panel = PanelMode::BuildLog;
+        self.gate_build();
     }
 
 /// Build all packages with BuildOutdated or BuildFailed status in topo order.
     pub fn build_all_buildable(&mut self) {
-        if self.build_queue.active {
+        if self.build_queue.active || self.preflight_pending {
             self.status_msg = Some("Build already in progress".to_string());
             return;
         }
@@ -723,8 +728,72 @@ impl App {
             .into_iter()
             .map(|n| BuildJob { name: n, status: BuildJobStatus::Pending })
             .collect();
+        self.gate_build();
+    }
+
+    /// Run pre-flight checks against the staged build jobs in a background thread (they shell
+    /// out to xbps-src/xbps and would otherwise freeze the UI). `poll_preflight` handles the
+    /// result: build immediately if clean, else show the pre-flight modal.
+    fn gate_build(&mut self) {
+        let void_pkgs = self.void_pkgs.clone();
+        let jobs = self.build_queue.jobs.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.preflight_rx = Some(rx);
+        self.preflight_pending = true;
+        self.status_msg = Some("Checking build pre-flight…".to_string());
+        std::thread::spawn(move || {
+            let _ = tx.send(build::preflight(&void_pkgs, &jobs));
+        });
+    }
+
+    /// Poll for pre-flight results. Call each tick.
+    pub fn poll_preflight(&mut self) {
+        if !self.preflight_pending {
+            return;
+        }
+        let warnings = match self.preflight_rx.as_ref().and_then(|rx| rx.try_recv().ok()) {
+            Some(w) => w,
+            None => return,
+        };
+        self.preflight_pending = false;
+        self.preflight_rx = None;
+        if warnings.is_empty() {
+            self.start_build_now();
+        } else {
+            self.build_preflight = Some(warnings);
+        }
+    }
+
+    fn start_build_now(&mut self) {
         self.build_queue.start(self.void_pkgs.clone());
         self.panel = PanelMode::BuildLog;
+    }
+
+    /// True when the pending pre-flight has a condition `./xbps-src clean` would fix.
+    pub fn preflight_cleanable(&self) -> bool {
+        self.build_preflight
+            .as_ref()
+            .is_some_and(|ws| ws.iter().any(|w| w.cleanable))
+    }
+
+    /// Pre-flight: build anyway, ignoring the warnings.
+    pub fn preflight_proceed(&mut self) {
+        self.build_preflight = None;
+        self.start_build_now();
+    }
+
+    /// Pre-flight: clean masterdir build state first, then build.
+    pub fn preflight_clean_and_build(&mut self) {
+        self.build_preflight = None;
+        self.status_msg = Some(build::clean_masterdir(&self.void_pkgs));
+        self.start_build_now();
+    }
+
+    /// Pre-flight: dismiss and do nothing (drop the staged jobs).
+    pub fn preflight_dismiss(&mut self) {
+        self.build_preflight = None;
+        self.build_queue.jobs.clear();
+        self.status_msg = Some("Build cancelled".to_string());
     }
 
 /// Apply pending shlib updates to common/shlibs.

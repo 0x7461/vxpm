@@ -107,12 +107,63 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     }
 
     // Confirmation modals — rendered last so they float above everything
-    if let Some(ref op) = app.cancel_confirm {
+    if let Some(ref warnings) = app.build_preflight {
+        draw_preflight_modal(f, warnings);
+    } else if let Some(ref op) = app.cancel_confirm {
         let msg = format!("Cancel {} in progress?  y = yes   Esc = no", op);
         draw_modal(f, &msg, RED);
     } else if app.quit_confirm {
         draw_modal(f, "Quit while operation is running?  y = yes   Esc = no", YELLOW);
     }
+}
+
+/// Multi-line pre-flight warning modal. Meaning lives in the text labels (⚠ + key hints),
+/// not color, so it stays legible regardless of color perception.
+fn draw_preflight_modal(f: &mut Frame, warnings: &[crate::build::PreflightWarning]) {
+    let area = f.area();
+    let cleanable = warnings.iter().any(|w| w.cleanable);
+
+    let mut lines: Vec<Line> = Vec::new();
+    lines.push(Line::from(Span::styled(
+        "Build pre-flight",
+        Style::default().fg(YELLOW).add_modifier(Modifier::BOLD),
+    )));
+    lines.push(Line::from(""));
+    for w in warnings {
+        lines.push(Line::from(format!("⚠ {}", w.message)));
+    }
+    lines.push(Line::from(""));
+    let hint = if cleanable {
+        "c = clean & build     b = build anyway     Esc = dismiss (do nothing)"
+    } else {
+        "b = build anyway     Esc = dismiss (do nothing)"
+    };
+    lines.push(Line::from(Span::styled(hint, Style::default().fg(OVERLAY0))));
+
+    let width = (area.width as f32 * 0.7) as u16;
+    let width = width.clamp(40, area.width.saturating_sub(4));
+    let inner = width.saturating_sub(2).max(1) as usize;
+    // Account for word-wrapping when estimating height.
+    let rows: usize = lines
+        .iter()
+        .map(|l| l.width().max(1).div_ceil(inner))
+        .sum();
+    let height = (rows as u16 + 2).min(area.height.saturating_sub(2));
+    let x = area.width.saturating_sub(width) / 2;
+    let y = area.height.saturating_sub(height) / 2;
+    let popup = Rect { x, y, width, height };
+
+    f.render_widget(Clear, popup);
+    let para = Paragraph::new(lines)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(YELLOW))
+                .title(" warning "),
+        )
+        .style(Style::default().fg(TEXT))
+        .wrap(Wrap { trim: true });
+    f.render_widget(para, popup);
 }
 
 fn draw_modal(f: &mut Frame, text: &str, border_color: Color) {
