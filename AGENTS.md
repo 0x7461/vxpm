@@ -1,6 +1,6 @@
 # AGENTS.md — vxpm
 
-Updated: 2026-06-01
+Updated: 2026-06-27
 
 Rust/ratatui TUI for managing the ~24 custom packages in `~/void-packages` (18 Hyprland-ecosystem + 6 others). Tracks versions, checks upstream, computes dependency-aware build order, rebuilds dependents, and drives the git workflow — replaces manual checking when bumping `hyprutils` requires rebuilding 15+ packages. Published as `0x7461/vxpm` on GitHub; xbps-src template at `~/void-packages/srcpkgs/vxpm/template`.
 
